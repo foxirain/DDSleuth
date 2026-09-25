@@ -197,9 +197,23 @@ def generate_trajectories(
             case = _apply_schedule(semantic_case, descriptor)
             descriptor_raw = descriptor.to_dict()
             schedule_digest = _descriptor_digest(descriptor_raw)
+            # A matrix-generated base id can exceed the readable prefix below.
+            # Hash the semantic assignments into the trajectory identity so two
+            # configurations with the same schedule cannot collapse after the
+            # prefix is truncated.
+            case_digest = (
+                schedule_digest
+                if not semantic_assignments
+                else _descriptor_digest(
+                    {
+                        "semantic": semantic_assignments,
+                        "trajectory": descriptor_raw,
+                    }
+                )
+            )
             base_id = str(semantic_case.get("id", "trajectory"))
             base_title = str(semantic_case.get("title", "DDS trajectory"))
-            case["id"] = f"{base_id[:96]}--trajectory-{schedule_digest[:12]}"
+            case["id"] = f"{base_id[:96]}--trajectory-{case_digest[:16]}"
             case["title"] = (
                 f"{base_title} [trajectory order={','.join(descriptor.order)}; "
                 f"spacing={descriptor.spacing_ms}ms; barriers={descriptor.barrier_mode}; "

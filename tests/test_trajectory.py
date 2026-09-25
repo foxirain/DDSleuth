@@ -222,6 +222,23 @@ class TrajectoryTests(unittest.TestCase):
         ]
         self.assertEqual(sorted(action_times), action_times)
 
+    def test_long_matrix_ids_remain_unique_after_trajectory_prefix_truncation(self) -> None:
+        raw = self._raw_scenario()
+        raw["id"] = "long-semantic-scenario-" + "x" * 120
+        trajectories = generate_trajectories(
+            raw,
+            dimensions=(
+                MatrixDimension(path=("domain_id",), values=(7, 8)),
+            ),
+            dimension_strategy="cartesian",
+            spacings_ms=(0,),
+            barrier_modes=("preserve",),
+            budget=2,
+        )
+        identifiers = [case["id"] for case, _ in trajectories]
+        self.assertEqual(2, len(identifiers))
+        self.assertEqual(2, len(set(identifiers)))
+
 
 if __name__ == "__main__":
     unittest.main()
