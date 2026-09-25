@@ -1,0 +1,70 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:ddsleuth:schema:campaign-report:v1",
+  "title": "DDSleuth campaign report",
+  "type": "object",
+  "required": [
+    "schema_version", "manifest_digest", "case_count", "repetitions", "trial_count",
+    "counts", "cases", "scenario_summaries"
+  ],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "manifest_digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "case_count": { "type": "integer", "minimum": 1 },
+    "repetitions": { "type": "integer", "minimum": 1 },
+    "trial_count": { "type": "integer", "minimum": 1 },
+    "counts": {
+      "type": "object",
+      "required": ["completed", "error", "pass", "violation", "inconclusive", "not_run"],
+      "additionalProperties": { "type": "integer", "minimum": 0 }
+    },
+    "cases": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "index", "repetition", "scenario_id", "scenario_digest", "assignments", "status",
+          "verdict", "run_dir", "violations", "failed_processes", "incomplete_processes", "capabilities",
+          "resumed", "duration_seconds", "configuration_binding"
+        ],
+        "properties": {
+          "index": { "type": "integer", "minimum": 0 },
+          "repetition": { "type": "integer", "minimum": 0 },
+          "scenario_id": { "type": "string", "minLength": 1 },
+          "scenario_digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+          "assignments": { "type": "object" },
+          "status": { "enum": ["completed", "error"] },
+          "verdict": { "enum": ["pass", "violation", "inconclusive"] },
+          "run_dir": { "type": "string", "minLength": 1 },
+          "violations": { "type": "integer", "minimum": 0 },
+          "failed_processes": { "type": "object" },
+          "incomplete_processes": {
+            "type": "array",
+            "items": { "type": "string", "minLength": 1 },
+            "uniqueItems": true
+          },
+          "capabilities": { "type": "object" },
+          "resumed": { "type": "boolean" },
+          "duration_seconds": { "type": "number", "minimum": 0 },
+          "configuration_binding": {
+            "enum": ["scenario_materialized", "external_unverified"]
+          },
+          "error": { "type": "object" }
+        },
+        "additionalProperties": false
+      }
+    },
+    "scenario_summaries": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "scenario_id", "scenario_digest", "assignments", "expected_trials",
+          "observed_trials", "pass", "violation", "inconclusive", "error",
+          "violation_rate", "violation_rate_wilson_95", "flaky"
+        ]
+      }
+    }
+  },
+  "additionalProperties": false
+}

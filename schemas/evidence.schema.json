@@ -1,0 +1,49 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:ddsleuth:schema:evidence:v1",
+  "title": "DDSleuth evidence bundle",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "run_id",
+    "scenario_id",
+    "scenario_digest",
+    "implementation",
+    "metadata",
+    "events"
+  ],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "run_id": { "type": "string", "minLength": 1 },
+    "scenario_id": { "type": "string", "minLength": 1 },
+    "scenario_digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "implementation": { "type": "string", "minLength": 1 },
+    "metadata": { "type": "object" },
+    "events": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "sequence",
+          "kind",
+          "actor",
+          "implementation",
+          "outcome",
+          "attributes"
+        ],
+        "properties": {
+          "sequence": { "type": "integer", "minimum": 0 },
+          "monotonic_ns": { "type": "integer", "minimum": 0 },
+          "kind": { "type": "string", "minLength": 1 },
+          "actor": { "type": "string", "minLength": 1 },
+          "implementation": { "type": "string", "minLength": 1 },
+          "outcome": { "type": "string", "minLength": 1 },
+          "source": { "type": "string" },
+          "attributes": { "type": "object" }
+        },
+        "additionalProperties": false
+      }
+    }
+  },
+  "additionalProperties": false
+}

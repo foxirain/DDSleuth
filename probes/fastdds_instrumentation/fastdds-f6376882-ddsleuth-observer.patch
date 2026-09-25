@@ -1,0 +1,140 @@
+diff --git a/src/cpp/security/cryptography/AESGCMGMAC_Transform.cpp b/src/cpp/security/cryptography/AESGCMGMAC_Transform.cpp
+index 11d3150b7..44ea29d51 100644
+--- a/src/cpp/security/cryptography/AESGCMGMAC_Transform.cpp
++++ b/src/cpp/security/cryptography/AESGCMGMAC_Transform.cpp
+@@ -18,6 +18,8 @@
+ 
+ #include <security/cryptography/AESGCMGMAC_Transform.h>
+ 
++#include <ddsleuth_fastdds_observer.hpp>
++
+ #include <fastdds/dds/log/Log.hpp>
+ #include <fastdds/rtps/common/CdrSerialization.hpp>
+ #include <rtps/messages/CDRMessage.hpp>
+@@ -126,10 +128,17 @@ bool AESGCMGMAC_Transform::encode_serialized_payload(
+     //If the maximum number of blocks have been processed, generate a new SessionKey
+     if (session->session_block_counter >= local_writer->max_blocks_per_session)
+     {
++        const uint32_t previous_session_id = session->session_id;
+         session->session_id += 1;
+ 
+         compute_sessionkey(session->SessionKey, keyMat, session->session_id);
+ 
++        ddsleuth::fastdds_observer::observe_session_rotation(
++            "serialized_payload",
++            previous_session_id,
++            session->session_id,
++            local_writer->max_blocks_per_session);
++
+         //ReceiverSpecific keys shall be computed specifically when needed
+         session->session_block_counter = 0;
+     }
+diff --git a/src/cpp/rtps/security/SecurityManager.cpp b/src/cpp/rtps/security/SecurityManager.cpp
+index cf104dc09..b7955b354 100644
+--- a/src/cpp/rtps/security/SecurityManager.cpp
++++ b/src/cpp/rtps/security/SecurityManager.cpp
+@@ -18,6 +18,8 @@
+ 
+ #include <rtps/security/SecurityManager.h>
+ 
++#include <ddsleuth_fastdds_observer.hpp>
++
+ #include <cassert>
+ #include <chrono>
+ #include <mutex>
+@@ -1946,6 +1948,15 @@ void SecurityManager::process_participant_volatile_message_secure(
+             return;
+         }
+ 
++        ddsleuth::fastdds_observer::observe_endpoint_tokens(
++            "received",
++            "datareader",
++            participant_->getGuid(),
++            message.destination_participant_key(),
++            message.destination_endpoint_key(),
++            message.source_endpoint_key(),
++            message.message_data());
++
+         // Search remote writer handle.
+         GUID_t writer_guid;
+         ReaderProxyData* reader_data = nullptr;
+@@ -2023,6 +2034,15 @@ void SecurityManager::process_participant_volatile_message_secure(
+             return;
+         }
+ 
++        ddsleuth::fastdds_observer::observe_endpoint_tokens(
++            "received",
++            "datawriter",
++            participant_->getGuid(),
++            message.destination_participant_key(),
++            message.destination_endpoint_key(),
++            message.source_endpoint_key(),
++            message.message_data());
++
+         // Search remote writer handle.
+         GUID_t reader_guid;
+         WriterProxyData* writer_data = nullptr;
+@@ -2442,6 +2462,15 @@ bool SecurityManager::exchange_writer_endpoint_crypto(
+         return false;
+     }
+ 
++    ddsleuth::fastdds_observer::observe_endpoint_tokens(
++        "generated",
++        "datawriter",
++        participant_->getGuid(),
++        remote_participant_guid,
++        remote_reader_guid,
++        local_writer_guid,
++        tokens);
++
+     ParticipantGenericMessage message = generate_writer_crypto_token_message(
+         remote_participant_guid, remote_reader_guid, local_writer_guid, tokens);
+ 
+@@ -2466,6 +2495,15 @@ bool SecurityManager::exchange_reader_endpoint_crypto(
+         return false;
+     }
+ 
++    ddsleuth::fastdds_observer::observe_endpoint_tokens(
++        "generated",
++        "datareader",
++        participant_->getGuid(),
++        remote_participant_guid,
++        remote_writer_guid,
++        local_reader_guid,
++        tokens);
++
+     ParticipantGenericMessage message = generate_reader_crypto_token_message(
+         remote_participant_guid, remote_writer_guid, local_reader_guid, tokens);
+ 
+@@ -3184,6 +3222,15 @@ bool SecurityManager::discovered_reader(
+                                     *local_writer->second.writer_handle,
+                                     *remote_reader_handle, exception))
+                         {
++                            ddsleuth::fastdds_observer::observe_endpoint_tokens(
++                                "generated",
++                                "datawriter",
++                                participant_->getGuid(),
++                                remote_participant_key,
++                                remote_reader_data.guid,
++                                writer_guid,
++                                local_writer_crypto_tokens);
++
+                             if (remote_participant_key == participant_->getGuid())
+                             {
+                                 EPROSIMA_LOG_INFO(SECURITY, "Process successful discovering local reader "
+@@ -3545,6 +3592,15 @@ bool SecurityManager::discovered_writer(
+                                     *remote_writer_handle,
+                                     exception))
+                         {
++                            ddsleuth::fastdds_observer::observe_endpoint_tokens(
++                                "generated",
++                                "datareader",
++                                participant_->getGuid(),
++                                remote_participant_key,
++                                remote_writer_data.guid,
++                                reader_guid,
++                                local_reader_crypto_tokens);
++
+                             if (remote_participant_key == participant_->getGuid())
+                             {
+                                 EPROSIMA_LOG_INFO(SECURITY, "Process successful discovering local writer "

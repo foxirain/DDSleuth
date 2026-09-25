@@ -1,0 +1,64 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:ddsleuth:schema:report:v1",
+  "title": "DDSleuth evaluation report",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "scenario_id",
+    "scenario_digest",
+    "run_id",
+    "verdict",
+    "failed_processes",
+    "incomplete_processes",
+    "oracle_results",
+    "capabilities"
+  ],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "scenario_id": { "type": "string", "minLength": 1 },
+    "scenario_digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "run_id": { "type": "string", "minLength": 1 },
+    "verdict": { "enum": ["pass", "violation", "inconclusive"] },
+    "failed_processes": {
+      "type": "object",
+      "additionalProperties": { "type": "integer" }
+    },
+    "incomplete_processes": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1 },
+      "uniqueItems": true
+    },
+    "oracle_results": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["assertion_id", "oracle", "status", "summary", "evidence_events", "details"],
+        "properties": {
+          "assertion_id": { "type": "string" },
+          "oracle": { "type": "string" },
+          "status": { "enum": ["pass", "violation", "not_applicable"] },
+          "summary": { "type": "string" },
+          "evidence_events": {
+            "type": "array",
+            "items": { "type": "integer", "minimum": 0 }
+          },
+          "details": { "type": "object" }
+        },
+        "additionalProperties": false
+      }
+    },
+    "capabilities": {
+      "type": "object",
+      "required": ["confidentiality", "integrity", "availability", "evidence_events"],
+      "properties": {
+        "confidentiality": { "enum": ["high", "not_demonstrated"] },
+        "integrity": { "enum": ["high", "not_demonstrated"] },
+        "availability": { "enum": ["high", "not_demonstrated"] },
+        "evidence_events": { "type": "object" }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

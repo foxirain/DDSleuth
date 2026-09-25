@@ -1,0 +1,45 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ddsleuth"
+version = "0.1.0a1"
+description = "Cross-layer security invariant testing for DDS implementations"
+readme = "README.md"
+requires-python = ">=3.11"
+authors = [{ name = "Taegu Ha" }]
+license = "Apache-2.0"
+license-files = ["LICENSE", "NOTICE"]
+keywords = ["DDS", "RTPS", "security", "protocol-testing", "distributed-systems"]
+classifiers = [
+  "Development Status :: 2 - Pre-Alpha",
+  "Intended Audience :: Developers",
+  "Intended Audience :: Science/Research",
+  "Topic :: Security",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Operating System :: POSIX :: Linux",
+]
+
+[project.urls]
+Homepage = "https://github.com/foxirain/DDSleuth"
+Repository = "https://github.com/foxirain/DDSleuth"
+Issues = "https://github.com/foxirain/DDSleuth/issues"
+
+[project.optional-dependencies]
+release = [
+  "build>=1.2,<2",
+  "twine>=5,<7",
+]
+
+[project.scripts]
+ddsleuth = "ddsleuth.cli:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+include-package-data = true
+
+[tool.setuptools.packages.find]
+where = ["src"]

@@ -1,0 +1,134 @@
+{
+  "schema_version": 1,
+  "id": "fastdds-native-key-distribution",
+  "title": "Fast DDS endpoint CryptoToken routing and key-scope baseline",
+  "implementation": {
+    "name": "fastdds",
+    "version": "3.6.2"
+  },
+  "domain_id": 224,
+  "participants": {
+    "reader": {
+      "role": "authorized_reader",
+      "identity": {
+        "subject": "/CN=observed-reader/O=DDSleuth"
+      },
+      "permissions": {
+        "subscribe": ["ObservedSecureTopic"]
+      }
+    },
+    "writer": {
+      "role": "authorized_writer",
+      "identity": {
+        "subject": "/CN=observed-writer/O=DDSleuth"
+      },
+      "permissions": {
+        "publish": ["ObservedSecureTopic"]
+      }
+    }
+  },
+  "policy": {
+    "grant_order": ["reader", "writer"]
+  },
+  "governance": {
+    "allow_unauthenticated_participants": false,
+    "enable_join_access_control": true,
+    "discovery_protection": "encrypt",
+    "liveliness_protection": "encrypt",
+    "rtps_protection": "encrypt"
+  },
+  "topics": {
+    "ObservedSecureTopic": {
+      "enable_discovery_protection": true,
+      "enable_liveliness_protection": true,
+      "enable_read_access_control": true,
+      "enable_write_access_control": true,
+      "metadata_protection": "encrypt_with_origin_authentication",
+      "data_protection": "encrypt"
+    }
+  },
+  "assertions": [
+    {
+      "id": "INV-OBSERVER-HEALTH-01",
+      "oracle": "observer_health",
+      "parameters": {}
+    },
+    {
+      "id": "INV-POLICY-01",
+      "oracle": "policy_authorization_consistency",
+      "parameters": {}
+    },
+    {
+      "id": "INV-RECIPIENT-01",
+      "oracle": "crypto_token_recipient_binding",
+      "parameters": {}
+    },
+    {
+      "id": "INV-TRANSPORT-01",
+      "oracle": "crypto_token_transport_consistency",
+      "parameters": {
+        "require_all_generated": true
+      }
+    },
+    {
+      "id": "INV-KEY-SCOPE-01",
+      "oracle": "key_scope_separation",
+      "parameters": {
+        "scope_attribute": "destination_participant_guid",
+        "observation_phase": "received",
+        "endpoint_class": "user"
+      }
+    }
+  ],
+  "execution": {
+    "network": "loopback",
+    "timeout_seconds": 40,
+    "log_format": "ddssec-jsonl",
+    "roles": [
+      {
+        "actor": "reader",
+        "command": [
+          "${DDSLEUTH_FASTDDS_NATIVE_PROBE}",
+          "reader",
+          "reader",
+          "224",
+          "ObservedSecureTopic",
+          "20000",
+          "allow"
+        ],
+        "environment": {
+          "ASAN_OPTIONS": "detect_leaks=0",
+          "DDSLEUTH_FASTDDS_OBSERVER": "1"
+        }
+      },
+      {
+        "actor": "writer",
+        "command": [
+          "${DDSLEUTH_FASTDDS_NATIVE_PROBE}",
+          "writer",
+          "writer",
+          "224",
+          "ObservedSecureTopic",
+          "20000",
+          "allow",
+          "observed native secure delivery"
+        ],
+        "environment": {
+          "ASAN_OPTIONS": "detect_leaks=0",
+          "DDSLEUTH_FASTDDS_OBSERVER": "1"
+        },
+        "start_after": [
+          {
+            "actor": "reader",
+            "kind": "probe.ready",
+            "outcome": "ready",
+            "attributes": {
+              "endpoint": "reader",
+              "topic": "ObservedSecureTopic"
+            }
+          }
+        ]
+      }
+    ]
+  }
+}

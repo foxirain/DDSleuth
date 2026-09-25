@@ -1,0 +1,139 @@
+{
+  "schema_version": 1,
+  "id": "fastdds-three-party-recipient-binding",
+  "title": "A topic-unauthorized participant must not receive another reader's endpoint CryptoToken",
+  "implementation": {
+    "name": "fastdds",
+    "version": "3.6.2.0"
+  },
+  "domain_id": 222,
+  "governance": {
+    "allow_unauthenticated_participants": false,
+    "enable_join_access_control": true,
+    "discovery_protection": "encrypt",
+    "liveliness_protection": "encrypt",
+    "rtps_protection": "encrypt"
+  },
+  "participants": {
+    "mallory": {
+      "role": "authenticated_low_privilege_participant",
+      "identity": {
+        "subject": "/CN=mallory/O=DDSleuth"
+      },
+      "permissions": {
+        "subscribe": ["DecoyTopic"]
+      }
+    },
+    "bob": {
+      "role": "authorized_reader",
+      "identity": {
+        "subject": "/CN=bob/O=DDSleuth"
+      },
+      "permissions": {
+        "subscribe": ["SecretTopic"]
+      }
+    },
+    "alice": {
+      "role": "protected_writer",
+      "identity": {
+        "subject": "/CN=alice/O=DDSleuth"
+      },
+      "permissions": {
+        "publish": ["SecretTopic"]
+      }
+    }
+  },
+  "policy": {
+    "grant_order": ["mallory", "bob", "alice"]
+  },
+  "topics": {
+    "SecretTopic": {
+      "enable_discovery_protection": true,
+      "enable_liveliness_protection": true,
+      "enable_read_access_control": true,
+      "enable_write_access_control": true,
+      "metadata_protection": "encrypt_with_origin_authentication",
+      "data_protection": "encrypt"
+    },
+    "DecoyTopic": {
+      "enable_discovery_protection": true,
+      "enable_liveliness_protection": true,
+      "enable_read_access_control": true,
+      "enable_write_access_control": true,
+      "metadata_protection": "encrypt_with_origin_authentication",
+      "data_protection": "encrypt"
+    }
+  },
+  "assertions": [
+    {
+      "id": "INV-RECIPIENT-01",
+      "oracle": "crypto_token_recipient_binding",
+      "parameters": {
+        "observer": "mallory",
+        "token_class": "datawriter"
+      }
+    },
+    {
+      "id": "INV-AUTHZ-02",
+      "oracle": "unauthorized_key_disclosure",
+      "parameters": {
+        "actor": "mallory"
+      }
+    },
+    {
+      "id": "INV-IMPERSONATION-03",
+      "oracle": "application_writer_impersonation",
+      "parameters": {
+        "attacker": "mallory",
+        "receiver": "bob",
+        "claimed_writer": "alice"
+      }
+    }
+  ],
+  "execution": {
+    "network": "loopback",
+    "timeout_seconds": 60,
+    "log_format": "fastdds-legacy-text",
+    "roles": [
+      {
+        "actor": "mallory",
+        "command": [
+          "${DDSLEUTH_FASTDDS_PROBE}",
+          "attacker",
+          "${DDSLEUTH_FASTDDS_CERTS}",
+          "${DDSLEUTH_FASTDDS_POLICIES}",
+          "${DDSLEUTH_RUN_DIR}/payload"
+        ],
+        "environment": {
+          "ASAN_OPTIONS": "detect_leaks=0"
+        }
+      },
+      {
+        "actor": "bob",
+        "command": [
+          "${DDSLEUTH_FASTDDS_PROBE}",
+          "intended",
+          "${DDSLEUTH_FASTDDS_CERTS}",
+          "${DDSLEUTH_FASTDDS_POLICIES}",
+          "${DDSLEUTH_RUN_DIR}/payload"
+        ],
+        "environment": {
+          "ASAN_OPTIONS": "detect_leaks=0"
+        }
+      },
+      {
+        "actor": "alice",
+        "command": [
+          "${DDSLEUTH_FASTDDS_PROBE}",
+          "victim",
+          "${DDSLEUTH_FASTDDS_CERTS}",
+          "${DDSLEUTH_FASTDDS_POLICIES}",
+          "${DDSLEUTH_RUN_DIR}/payload"
+        ],
+        "environment": {
+          "ASAN_OPTIONS": "detect_leaks=0"
+        }
+      }
+    ]
+  }
+}

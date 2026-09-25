@@ -1,0 +1,106 @@
+{
+  "schema_version": 1,
+  "id": "fastdds-native-secure-delivery",
+  "title": "Native Fast DDS secure endpoint authorization and application delivery",
+  "implementation": {
+    "name": "fastdds",
+    "version": "3.x"
+  },
+  "domain_id": 223,
+  "participants": {
+    "reader": {
+      "role": "authorized_reader",
+      "identity": {
+        "subject": "/CN=native-reader/O=DDSleuth"
+      },
+      "permissions": {
+        "subscribe": ["NativeSecureTopic"]
+      }
+    },
+    "writer": {
+      "role": "authorized_writer",
+      "identity": {
+        "subject": "/CN=native-writer/O=DDSleuth"
+      },
+      "permissions": {
+        "publish": ["NativeSecureTopic"]
+      }
+    }
+  },
+  "policy": {
+    "grant_order": ["reader", "writer"]
+  },
+  "governance": {
+    "allow_unauthenticated_participants": false,
+    "enable_join_access_control": true,
+    "discovery_protection": "encrypt",
+    "liveliness_protection": "encrypt",
+    "rtps_protection": "encrypt"
+  },
+  "topics": {
+    "NativeSecureTopic": {
+      "enable_discovery_protection": true,
+      "enable_liveliness_protection": true,
+      "enable_read_access_control": true,
+      "enable_write_access_control": true,
+      "metadata_protection": "encrypt_with_origin_authentication",
+      "data_protection": "encrypt"
+    }
+  },
+  "assertions": [
+    {
+      "id": "INV-POLICY-DELIVERY-01",
+      "oracle": "policy_authorization_consistency",
+      "parameters": {}
+    }
+  ],
+  "execution": {
+    "network": "loopback",
+    "timeout_seconds": 40,
+    "log_format": "ddssec-jsonl",
+    "roles": [
+      {
+        "actor": "reader",
+        "command": [
+          "${DDSLEUTH_FASTDDS_NATIVE_PROBE}",
+          "reader",
+          "reader",
+          "223",
+          "NativeSecureTopic",
+          "20000",
+          "allow"
+        ],
+        "environment": {
+          "ASAN_OPTIONS": "detect_leaks=0"
+        }
+      },
+      {
+        "actor": "writer",
+        "command": [
+          "${DDSLEUTH_FASTDDS_NATIVE_PROBE}",
+          "writer",
+          "writer",
+          "223",
+          "NativeSecureTopic",
+          "20000",
+          "allow",
+          "native secure delivery"
+        ],
+        "environment": {
+          "ASAN_OPTIONS": "detect_leaks=0"
+        },
+        "start_after": [
+          {
+            "actor": "reader",
+            "kind": "probe.ready",
+            "outcome": "ready",
+            "attributes": {
+              "endpoint": "reader",
+              "topic": "NativeSecureTopic"
+            }
+          }
+        ]
+      }
+    ]
+  }
+}
