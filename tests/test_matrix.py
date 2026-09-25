@@ -48,6 +48,22 @@ class MatrixTests(unittest.TestCase):
             with self.assertRaisesRegex(MatrixError, "does not exist"):
                 write_matrix(base, Path(directory), dimensions)
 
+    def test_mutates_values_inside_role_arrays(self) -> None:
+        raw = json.loads(
+            (ROOT / "examples/fastdds/native_session_rotation.json").read_text()
+        )
+        dimensions = (
+            parse_dimension(
+                'execution.roles.1.environment.DDSLEUTH_SAMPLE_COUNT=["6","8"]'
+            ),
+        )
+        cases = expand_matrix(raw, dimensions)
+        self.assertEqual(2, len(cases))
+        self.assertEqual(
+            "8",
+            cases[1][0]["execution"]["roles"][1]["environment"]["DDSLEUTH_SAMPLE_COUNT"],
+        )
+
     def test_pairwise_strategy_covers_every_value_pair(self) -> None:
         base_path = ROOT / "examples/fastdds/three_party_recipient_binding.json"
         raw = json.loads(base_path.read_text())

@@ -586,6 +586,7 @@ class OracleTests(unittest.TestCase):
                 "observed",
                 observation_phase="received",
                 endpoint_class="user",
+                material_semantics="recipient_specific",
                 key_fingerprint=f"hmac-sha256-run-local-v1:{actor}",
                 destination_participant_guid=f"{actor}|participant",
             )

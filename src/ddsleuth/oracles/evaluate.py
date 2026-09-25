@@ -16,6 +16,7 @@ from .policy_consistency import PolicyAuthorizationConsistencyOracle
 from .recipient_binding import RecipientBindingOracle
 from .session_rotation import SessionRotationDeliveryOracle
 from .token_transport import CryptoTokenTransportConsistencyOracle
+from ..semantics import event_resource, is_permitted
 
 
 _ORACLES: Mapping[str, Oracle] = {
@@ -76,7 +77,7 @@ class EvaluationReport:
         }
 
 
-def _capabilities(evidence: EvidenceBundle) -> CapabilityAssessment:
+def _capabilities(scenario: Scenario, evidence: EvidenceBundle) -> CapabilityAssessment:
     confidentiality: list[int] = []
     integrity: list[int] = []
     availability: list[int] = []
@@ -85,6 +86,15 @@ def _capabilities(evidence: EvidenceBundle) -> CapabilityAssessment:
         sequence = index if event.sequence is None else event.sequence
         if event.kind == EventKind.DECRYPT_CAPABILITY and event.outcome == "succeeded":
             confidentiality.append(sequence)
+        if event.kind == EventKind.APPLICATION_SAMPLE_RECEIVED and event.outcome == "received":
+            resource = event_resource(scenario, event, operation="subscribe")
+            if resource is not None and not is_permitted(
+                scenario,
+                event.actor,
+                "subscribe",
+                resource,
+            ):
+                confidentiality.append(sequence)
         if event.kind in (
             EventKind.FORGE_CAPABILITY,
             EventKind.PROTECTED_MESSAGE_ACCEPTED,
@@ -173,5 +183,5 @@ def evaluate(scenario: Scenario, evidence: EvidenceBundle) -> EvaluationReport:
         failed_processes=failed_processes,
         incomplete_processes=incomplete_processes,
         oracle_results=tuple(results),
-        capabilities=_capabilities(evidence),
+        capabilities=_capabilities(scenario, evidence),
     )

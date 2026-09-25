@@ -20,8 +20,9 @@ ddsleuth_fastdds_probe ACTOR MODE DOMAIN TOPIC TIMEOUT_MS EXPECTED [MESSAGE]
 ```
 
 `MODE` is `writer`, `recreate-writer`, `reader`, `check-writer`, `check-reader`,
-`observe-denied-writer`, or `observe-denied-reader`; `EXPECTED` is `allow` or
-`deny`. Check modes stop after the endpoint authorization decision. Observe-denied
+`scripted-writer`, `scripted-reader`, `observe-denied-writer`, or
+`observe-denied-reader`; `EXPECTED` is `allow` or `deny`. Check modes stop after the
+endpoint authorization decision. Observe-denied
 modes keep an authenticated participant whose denied endpoint was rejected alive for
 the configured timeout. Reader and writer modes emit `probe.ready` events and use DDS
 callbacks and condition variables, not fixed sleeps.
@@ -39,6 +40,15 @@ process teardown.
 `DDSLEUTH_MAX_BLOCKS_PER_SESSION` sets the Fast DDS endpoint property
 `dds.sec.crypto.maxblockspersession`, allowing short, deterministic session-key
 rotation campaigns when paired with `DDSLEUTH_EXPECTED_SAMPLES` on the reader.
+
+Scripted modes consume the runner-generated `DDSLEUTH_ACTION_PLAN`. Writer plans
+support `endpoint.create`, `endpoint.wait_match`, `sample.write`, and
+`endpoint.destroy`; reader plans support `endpoint.create`, `sample.wait`, and
+`endpoint.destroy`. An optional first argument overrides the match/sample target or
+the written message as appropriate. The plan path is runner-reserved, its fields are
+validated before launch, and every action is bracketed by `action.started` and
+`action.completed` events. This makes endpoint lifecycle order and timing scenario
+data rather than a growing collection of hard-coded probe modes.
 
 Required environment variables are `DDSLEUTH_IDENTITY_CA`,
 `DDSLEUTH_IDENTITY_CERTIFICATE`, `DDSLEUTH_IDENTITY_PRIVATE_KEY`, and

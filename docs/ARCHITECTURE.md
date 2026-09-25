@@ -2,90 +2,143 @@
 
 ## Design goal
 
-DDSleuth separates the question *what security property should hold?* from *how does this DDS implementation expose enough evidence to test it?*
+DDSleuth searches runtime states that are poorly represented by a static control-flow
+view. Its product is a ranked, replayable candidate trace—not an exploit proof.
 
 ```text
-Scenario
-   |
-   v
-Process runner -----> Implementation adapter
-   |                         |
-   |                         v
-   +-----------------> Normalized events
-                              |
-                              v
-                    Invariant and capability engine
-                              |
-                              v
-                    Reproducible evidence report
+Semantic scenario
+       |
+       v
+Trajectory generator -----> Distributed scheduler
+                                  |
+                                  v
+Implementation adapter ----> Normalized runtime events
+                                  |
+                                  v
+                  Temporal/security invariant engine
+                                  |
+                                  v
+                 Candidate extraction and clustering
+                                  |
+                                  v
+                    Ranked replayable runtime leads
 ```
+
+Source scanning, exploit generation, exploitability proof, and disclosure writing are
+non-goals. They can consume DDSleuth output, but they are not stages of DDSleuth.
 
 ## Scenario layer
 
-A scenario declares actors, policy intent, protected resources, implementation configuration, process roles, and assertions. It does not contain an oracle implementation or vendor-private object layout.
+A scenario declares actors, policy intent, protected resources, implementation
+configuration, process roles, and assertions. It does not contain an oracle
+implementation or vendor-private object layout.
 
 `policy.grant_order` is explicit because grant selection order can be security-relevant
 when certificate subjects collide or overlap. Object insertion order and JSON
-serialization order are never used as a hidden policy input; grant order can be varied
-directly as a matrix dimension.
+serialization order are never used as hidden policy inputs.
 
-## Adapter layer
+## Trajectory layer
 
-An adapter is responsible for launching or attaching to one DDS implementation and translating its observations into normalized events. White-box adapters may instrument a security plugin or implementation internals. Black-box adapters may use RTPS capture, a controlled participant, and application callbacks.
+A trajectory is a concrete distributed schedule: role start order, monotonic launch
+offsets, event barriers, and semantic scenario assignments. `preserve` schedules keep
+the baseline causal barriers. `relaxed` schedules deliberately remove them and explore
+join/order races. The generator always retains a baseline and uses a deterministic seed
+to select the remaining schedules under a fixed execution budget.
 
-The first adapter imports the existing Fast DDS harness logs. This importer is a migration boundary, not the final instrumentation protocol. Native probes emit normalized JSON events through `probes/common/ddsleuth_event.hpp`.
+Matrix dimensions remain useful for semantic controls, but they are inputs to the
+trajectory generator rather than the primary abstraction. Dotted paths can address
+array elements, allowing environment and command parameters of individual roles to be
+varied alongside their schedule. Roles can also carry a timed, ordered action plan.
+The core validates and materializes the plan but treats action names as adapter-owned
+semantics; this keeps endpoint lifecycle execution vendor-neutral while allowing
+matrix paths to mutate individual action times and arguments.
 
-Native scenarios may declare `start_after` event barriers on a role. The runner tails
-structured events from already-started roles and starts the dependent role only after
-the required actor, event kind, outcome, and optional attributes are observed. A source
-process that exits early or a barrier timeout is an infrastructure error, not a passing
-security result.
+## Scheduler and adapter layer
+
+An adapter launches or attaches to one DDS implementation and translates its
+observations into normalized events. White-box adapters may instrument a security
+plugin or implementation boundary. Black-box adapters may use RTPS capture, controlled
+participants, and application callbacks.
+
+Native scenarios coordinate roles with structured event barriers. Launch offsets are
+exploration mutations, not causal evidence. A source process that exits early or a
+barrier timeout is not a passing security result. The adapter nevertheless preserves
+events produced before the divergence, adds `execution.divergence`, and records
+unlaunched roles. Candidate extraction can retain an earlier overgrant or key-route
+anomaly without pretending the complete experiment succeeded.
+
+Every role records the basename, size, and SHA-256 of its resolved executable. Policy,
+identity-certificate, scenario, and executable digests form the configuration
+provenance needed to compare or replay a trial. Absolute host paths are omitted.
+Action plans are derived deterministically from the digested scenario, stored beside
+the run logs, and exposed through a runner-reserved environment variable that scenario
+roles cannot replace.
 
 ## Evidence layer
 
-Events record concrete observations, not conclusions. Examples include:
+Events record observations, not conclusions. Examples include:
 
-- endpoint creation denied by access control;
-- CryptoToken plaintext observed by a participant;
-- inner token destination differs from the observing participant;
-- sender or receiver-specific key material is present;
-- legitimate protected traffic was decrypted;
-- forged protected traffic was accepted;
-- attacker-controlled data reached an application reader.
+- endpoint creation allowed or denied by access control;
+- a CryptoToken generated or received on a concrete route;
+- common sender or receiver-specific key material observed through a run-local HMAC;
+- endpoint destruction and recreation boundaries;
+- session rotation;
+- protected data returned by a real application reader;
+- scheduler or process divergence after a partial security trace.
 
-Secret key bytes are never required in the normalized evidence format.
+Secret key bytes are never required in the normalized evidence format. Native events
+carry monotonic timestamps so cross-process temporal checks do not depend on filename
+or buffered log order.
 
-## Oracle layer
+## Semantic invariant layer
 
-Oracles evaluate one invariant against a scenario and its events. They return `pass`, `violation`, or `not_applicable`, together with the exact event indexes supporting the result. Capability assessment is separate from root-cause classification so that an unexpected token is not automatically described as an integrity or availability compromise.
+Oracles evaluate declared properties and return `pass`, `violation`, or
+`not_applicable` with exact event indexes. They are fail-closed: incomplete observation
+does not become a pass. Capability assessment remains separate from root-cause
+classification.
 
-Instrumentation health is itself an invariant. An enabled observer must emit its
-required evidence and no observer-error event; otherwise the affected run is
-inconclusive. Lifecycle oracles consume explicit endpoint destruction boundaries and
-monotonic cross-process ordering rather than inferring epochs from filenames or sleeps.
+Instrumentation health is itself an invariant. An enabled observer must emit required
+evidence and no observer error. Lifecycle oracles consume explicit destruction,
+revocation, and rotation boundaries.
+
+Fast DDS KeyMaterial is split into `common_sender` and `recipient_specific` components
+before fingerprinting. Common sender material is intentionally shared by authorized
+receivers; destination-scope separation applies only to recipient-specific material.
+Direction is evaluated independently: received `datawriter` material requires local
+subscribe authority and received `datareader` material requires local publish
+authority. This prevents normal protected writer/reader pairing from being promoted
+as unauthorized key delivery.
+
+## Candidate layer
+
+Candidates are discovery leads, not vulnerability verdicts. A candidate has a stable
+semantic fingerprint, risk tier, priority score, confidence, actors, resources, exact
+event indexes, and the schedule that exposed it. Policy overgrant, unauthorized
+application delivery, unauthorized user-key delivery, temporal invariant violations,
+and partial stateful divergences are extracted independently of process success.
+
+The exploration aggregator clusters the same candidate across trajectories and
+repetitions. It reports occurrence rate, complete-run occurrences, schedule
+sensitivity, and whether the signal appeared only after schedule mutation. Candidate
+ranking never upgrades a lead into a CVSS or exploitability claim.
 
 ## Campaign layer
 
-The matrix engine mutates declared scenario fields and records every assignment and
-scenario digest in a manifest. The campaign runner verifies those digests, executes one
-case at a time, preserves evidence per case, and aggregates pass, violation,
-inconclusive, and infrastructure-error counts. Process failures and harness errors are
-never converted into passing security assertions. Sequential execution is the safe
-default until a scheduler can prove domain and transport isolation between cases.
-Policy mutations are fail-closed: campaign execution requires per-case policy
-materialization, records the exact artifact hashes and signing-certificate hash in the
-evidence bundle, and injects that directory into the adapter. External policies may be
-used only through an explicit diagnostic override and are labelled unverified.
+The campaign runner verifies scenario digests, materializes per-case identities and
+policies when requested, executes cases sequentially, and preserves evidence per
+trial. Repetitions retain every outcome and report violation rate, Wilson interval, and
+mixed-outcome status. Sequential execution remains the safe default until isolation of
+DDS domains and transport resources can be proven.
 
-Every launched role records the basename, size, and SHA-256 of its resolved executable
-in the evidence metadata. Absolute host paths are intentionally omitted. Policy,
-identity-certificate, scenario, and executable digests together form the minimum
-configuration provenance needed to compare or reproduce a campaign result.
+Policy mutations are fail-closed. A campaign must materialize and sign policy artifacts
+per case, or explicitly mark an external configuration as unverified for diagnostics.
 
-## Fast DDS first
+## Fast DDS first and portability boundary
 
-Fast DDS is the initial implementation adapter because the golden experiment already covers signed policies, three independent identities, endpoint matching, volatile-secure token delivery, AES-GCM-GMAC key material, raw UDP, RTPS parsing, and application delivery. The core must not import Fast DDS headers or depend on Fast DDS GUID layouts.
+Fast DDS is the reference target because the current vertical slice covers signed
+policies, multiple identities, endpoint matching, volatile-secure token delivery,
+AES-GCM-GMAC material, lifecycle transitions, session rotation, and application
+delivery. The core does not import Fast DDS headers or depend on its GUID layout.
 
-## Portability boundary
-
-Future Cyclone DDS, OpenDDS, and Connext adapters must emit the same normalized event types. A scenario should require only adapter configuration changes when it is portable across implementations.
+Future Cyclone DDS, OpenDDS, and Connext adapters must emit the same normalized event
+types. Portable scenarios should require only adapter configuration changes.

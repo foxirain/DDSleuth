@@ -5,7 +5,9 @@
 #include <condition_variable>
 #include <cstdint>
 #include <cstdlib>
+#include <cmath>
 #include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <limits>
 #include <memory>
@@ -61,6 +63,14 @@ struct Arguments
     uint32_t max_blocks_per_session;
     std::string expected;
     std::string message;
+};
+
+struct PlannedAction
+{
+    double at_ms;
+    std::string id;
+    std::string operation;
+    std::vector<std::string> arguments;
 };
 
 std::string required_environment(
@@ -123,6 +133,90 @@ uint32_t nonnegative_environment(
     return static_cast<uint32_t>(value);
 }
 
+uint32_t positive_text(
+        const std::string& text,
+        const std::string& context)
+{
+    size_t consumed = 0;
+    const unsigned long value = std::stoul(text, &consumed);
+    if (consumed != text.size() || value == 0 ||
+            value > static_cast<unsigned long>(UINT32_MAX))
+    {
+        throw std::runtime_error(context + " must be a positive 32-bit integer");
+    }
+    return static_cast<uint32_t>(value);
+}
+
+std::vector<std::string> split_tabs(
+        const std::string& line)
+{
+    std::vector<std::string> fields;
+    size_t start = 0;
+    while (true)
+    {
+        const size_t delimiter = line.find('\t', start);
+        fields.push_back(line.substr(start, delimiter - start));
+        if (delimiter == std::string::npos)
+        {
+            break;
+        }
+        start = delimiter + 1;
+    }
+    return fields;
+}
+
+std::vector<PlannedAction> load_action_plan()
+{
+    const std::filesystem::path path(required_environment("DDSLEUTH_ACTION_PLAN"));
+    std::ifstream input(path);
+    if (!input)
+    {
+        throw std::runtime_error("cannot open DDSLEUTH_ACTION_PLAN");
+    }
+    std::string line;
+    if (!std::getline(input, line) || line != "# ddsleuth-action-plan-v1")
+    {
+        throw std::runtime_error("unsupported DDSLEUTH_ACTION_PLAN header");
+    }
+    std::vector<PlannedAction> actions;
+    double previous_at_ms = -1.0;
+    size_t line_number = 1;
+    while (std::getline(input, line))
+    {
+        ++line_number;
+        if (line.empty())
+        {
+            continue;
+        }
+        std::vector<std::string> fields = split_tabs(line);
+        if (fields.size() < 3 || fields[1].empty() || fields[2].empty())
+        {
+            throw std::runtime_error(
+                      "invalid action plan line " + std::to_string(line_number));
+        }
+        size_t consumed = 0;
+        const double at_ms = std::stod(fields[0], &consumed);
+        if (consumed != fields[0].size() || !std::isfinite(at_ms) ||
+                at_ms < 0 || at_ms < previous_at_ms)
+        {
+            throw std::runtime_error(
+                      "action plan timestamps must be finite, non-negative, and ordered");
+        }
+        previous_at_ms = at_ms;
+        actions.push_back({
+            at_ms,
+            fields[1],
+            fields[2],
+            std::vector<std::string>(fields.begin() + 3, fields.end()),
+        });
+    }
+    if (actions.empty())
+    {
+        throw std::runtime_error("DDSLEUTH_ACTION_PLAN contains no actions");
+    }
+    return actions;
+}
+
 std::string file_uri(
         const std::filesystem::path& path)
 {
@@ -150,13 +244,15 @@ Arguments parse_arguments(
         throw std::runtime_error("TIMEOUT_MS must be positive");
     }
     const std::string mode = argv[2];
-    if (mode != "writer" && mode != "recreate-writer" && mode != "reader" && mode != "check-reader" &&
+    if (mode != "writer" && mode != "recreate-writer" && mode != "scripted-writer" &&
+            mode != "reader" && mode != "scripted-reader" && mode != "check-reader" &&
             mode != "check-writer" && mode != "observe-denied-reader" &&
             mode != "observe-denied-writer")
     {
         throw std::runtime_error(
-                  "MODE must be writer, recreate-writer, reader, check-reader, check-writer, "
-                  "observe-denied-reader, or observe-denied-writer");
+                  "MODE must be writer, recreate-writer, scripted-writer, reader, "
+                  "scripted-reader, check-reader, check-writer, observe-denied-reader, "
+                  "or observe-denied-writer");
     }
     const std::string expected = argv[6];
     if (expected != "allow" && expected != "deny")
@@ -407,6 +503,12 @@ public:
         return matched_count_;
     }
 
+    void reset()
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        matched_count_ = 0;
+    }
+
 private:
 
     std::mutex mutex_;
@@ -421,10 +523,12 @@ public:
     ReaderListener(
             DynamicType::_ref_type type,
             ddsleuth::EventSink& sink,
-            std::string actor)
+            std::string actor,
+            std::string topic)
         : data_(DynamicDataFactory::get_instance()->create_data(type))
         , sink_(sink)
         , actor_(std::move(actor))
+        , topic_(std::move(topic))
     {
         if (!data_)
         {
@@ -452,6 +556,7 @@ public:
             ddsleuth::JsonObject attributes;
             attributes.integer("sample_index", index)
                     .string("message", message)
+                    .string("topic", topic_)
                     .boolean("attacker_controlled", false);
             sink_.emit("application.sample_received", actor_, "received", attributes);
             received_.fetch_add(1);
@@ -470,11 +575,17 @@ public:
                 });
     }
 
+    uint32_t received_count() const
+    {
+        return received_.load();
+    }
+
 private:
 
     DynamicData::_ref_type data_;
     ddsleuth::EventSink& sink_;
     std::string actor_;
+    std::string topic_;
     std::atomic<uint32_t> received_{0};
     std::mutex mutex_;
     std::condition_variable condition_;
@@ -547,6 +658,262 @@ void hold_after_write(
                     .integer("hold_ms", arguments.hold_after_write.count())
                     .integer("lifecycle_epoch", lifecycle_epoch));
     std::this_thread::sleep_for(arguments.hold_after_write);
+}
+
+void wait_for_action_time(
+        const std::chrono::steady_clock::time_point& started,
+        const PlannedAction& action)
+{
+    const auto offset = std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+        std::chrono::duration<double, std::milli>(action.at_ms));
+    std::this_thread::sleep_until(started + offset);
+}
+
+void emit_action_event(
+        ddsleuth::EventSink& sink,
+        const Arguments& arguments,
+        const PlannedAction& action,
+        const std::string& kind,
+        const std::string& outcome)
+{
+    sink.emit(
+        kind,
+        arguments.actor,
+        outcome,
+        ddsleuth::JsonObject()
+                .string("action_id", action.id)
+                .string("operation", action.operation)
+                .string("scheduled_at_ms", std::to_string(action.at_ms)));
+}
+
+uint32_t action_count(
+        const PlannedAction& action,
+        uint32_t fallback)
+{
+    return action.arguments.empty() ?
+           fallback :
+           positive_text(action.arguments[0], "action " + action.id + " count");
+}
+
+int run_scripted_writer(
+        const Arguments& arguments,
+        DomainParticipant* participant,
+        Topic* topic,
+        DynamicType::_ref_type dynamic_type,
+        ddsleuth::EventSink& sink)
+{
+    const std::vector<PlannedAction> actions = load_action_plan();
+    Publisher* publisher = participant->create_publisher(PUBLISHER_QOS_DEFAULT);
+    if (publisher == nullptr)
+    {
+        throw std::runtime_error("cannot create publisher");
+    }
+    WriterListener listener;
+    PublisherOwner publisher_owner(participant, publisher);
+    DataWriterQos writer_qos = DATAWRITER_QOS_DEFAULT;
+    publisher->get_default_datawriter_qos(writer_qos);
+    writer_qos.reliability().kind = RELIABLE_RELIABILITY_QOS;
+    if (arguments.max_blocks_per_session > 0)
+    {
+        writer_qos.properties().properties().emplace_back(
+            "dds.sec.crypto.maxblockspersession",
+            std::to_string(arguments.max_blocks_per_session));
+    }
+
+    DataWriter* writer = nullptr;
+    uint32_t lifecycle_epoch = 0;
+    uint32_t sample_index = 0;
+    const auto started = std::chrono::steady_clock::now();
+    for (const PlannedAction& action : actions)
+    {
+        wait_for_action_time(started, action);
+        emit_action_event(sink, arguments, action, "action.started", "started");
+        if (action.operation == "endpoint.create")
+        {
+            if (writer != nullptr)
+            {
+                throw std::runtime_error("cannot create a writer while one is active");
+            }
+            listener.reset();
+            writer = publisher->create_datawriter(
+                topic,
+                writer_qos,
+                &listener,
+                StatusMask::all());
+            const bool allowed = writer != nullptr;
+            emit_access_decision(sink, arguments, "create_datawriter", allowed);
+            if ((allowed ? "allow" : "deny") != arguments.expected)
+            {
+                return 4;
+            }
+            if (allowed)
+            {
+                ++lifecycle_epoch;
+                sink.emit(
+                    lifecycle_epoch == 1 ? "endpoint.created" : "endpoint.recreated",
+                    arguments.actor,
+                    "created",
+                    ddsleuth::JsonObject()
+                            .string("endpoint", "writer")
+                            .string("topic", arguments.topic)
+                            .integer("lifecycle_epoch", lifecycle_epoch));
+            }
+        }
+        else if (action.operation == "endpoint.wait_match")
+        {
+            if (writer == nullptr)
+            {
+                throw std::runtime_error("cannot wait for a match without an active writer");
+            }
+            const uint32_t target = action_count(action, arguments.expected_matches);
+            if (!listener.wait(arguments.timeout, target))
+            {
+                throw std::runtime_error("scripted writer did not reach the requested match count");
+            }
+            sink.emit("endpoint.matched", arguments.actor, "matched",
+                    ddsleuth::JsonObject()
+                            .string("endpoint", "writer")
+                            .string("topic", arguments.topic)
+                            .integer("matched_count", listener.matched_count())
+                            .integer("expected_matches", target)
+                            .integer("lifecycle_epoch", lifecycle_epoch));
+        }
+        else if (action.operation == "sample.write")
+        {
+            if (writer == nullptr)
+            {
+                throw std::runtime_error("cannot write without an active writer");
+            }
+            ++sample_index;
+            const std::string message = action.arguments.empty() ?
+                    arguments.message : action.arguments[0];
+            write_sample(
+                writer,
+                dynamic_type,
+                sink,
+                arguments,
+                sample_index,
+                message,
+                lifecycle_epoch);
+        }
+        else if (action.operation == "endpoint.destroy")
+        {
+            if (writer == nullptr)
+            {
+                throw std::runtime_error("cannot destroy a writer when none is active");
+            }
+            if (publisher->delete_datawriter(writer) != RETCODE_OK)
+            {
+                throw std::runtime_error("cannot destroy scripted writer");
+            }
+            writer = nullptr;
+            sink.emit("endpoint.destroyed", arguments.actor, "destroyed",
+                    ddsleuth::JsonObject()
+                            .string("endpoint", "writer")
+                            .string("topic", arguments.topic)
+                            .integer("lifecycle_epoch", lifecycle_epoch));
+        }
+        else
+        {
+            throw std::runtime_error("unsupported scripted writer action: " + action.operation);
+        }
+        emit_action_event(sink, arguments, action, "action.completed", "completed");
+    }
+    return 0;
+}
+
+int run_scripted_reader(
+        const Arguments& arguments,
+        DomainParticipant* participant,
+        Topic* topic,
+        DynamicType::_ref_type dynamic_type,
+        ddsleuth::EventSink& sink)
+{
+    const std::vector<PlannedAction> actions = load_action_plan();
+    Subscriber* subscriber = participant->create_subscriber(SUBSCRIBER_QOS_DEFAULT);
+    if (subscriber == nullptr)
+    {
+        throw std::runtime_error("cannot create subscriber");
+    }
+    ReaderListener listener(dynamic_type, sink, arguments.actor, arguments.topic);
+    SubscriberOwner subscriber_owner(participant, subscriber);
+    DataReaderQos reader_qos = DATAREADER_QOS_DEFAULT;
+    subscriber->get_default_datareader_qos(reader_qos);
+    reader_qos.reliability().kind = RELIABLE_RELIABILITY_QOS;
+
+    DataReader* reader = nullptr;
+    uint32_t lifecycle_epoch = 0;
+    const auto started = std::chrono::steady_clock::now();
+    for (const PlannedAction& action : actions)
+    {
+        wait_for_action_time(started, action);
+        emit_action_event(sink, arguments, action, "action.started", "started");
+        if (action.operation == "endpoint.create")
+        {
+            if (reader != nullptr)
+            {
+                throw std::runtime_error("cannot create a reader while one is active");
+            }
+            reader = subscriber->create_datareader(
+                topic,
+                reader_qos,
+                &listener,
+                StatusMask::all());
+            const bool allowed = reader != nullptr;
+            emit_access_decision(sink, arguments, "create_datareader", allowed);
+            if ((allowed ? "allow" : "deny") != arguments.expected)
+            {
+                return 4;
+            }
+            if (allowed)
+            {
+                ++lifecycle_epoch;
+                sink.emit(
+                    lifecycle_epoch == 1 ? "endpoint.created" : "endpoint.recreated",
+                    arguments.actor,
+                    "created",
+                    ddsleuth::JsonObject()
+                            .string("endpoint", "reader")
+                            .string("topic", arguments.topic)
+                            .integer("lifecycle_epoch", lifecycle_epoch));
+            }
+        }
+        else if (action.operation == "sample.wait")
+        {
+            if (reader == nullptr)
+            {
+                throw std::runtime_error("cannot wait for a sample without an active reader");
+            }
+            const uint32_t target = action_count(action, arguments.expected_samples);
+            if (!listener.wait(arguments.timeout, target))
+            {
+                throw std::runtime_error("scripted reader did not receive the requested samples");
+            }
+        }
+        else if (action.operation == "endpoint.destroy")
+        {
+            if (reader == nullptr)
+            {
+                throw std::runtime_error("cannot destroy a reader when none is active");
+            }
+            if (subscriber->delete_datareader(reader) != RETCODE_OK)
+            {
+                throw std::runtime_error("cannot destroy scripted reader");
+            }
+            reader = nullptr;
+            sink.emit("endpoint.destroyed", arguments.actor, "destroyed",
+                    ddsleuth::JsonObject()
+                            .string("endpoint", "reader")
+                            .string("topic", arguments.topic)
+                            .integer("lifecycle_epoch", lifecycle_epoch));
+        }
+        else
+        {
+            throw std::runtime_error("unsupported scripted reader action: " + action.operation);
+        }
+        emit_action_event(sink, arguments, action, "action.completed", "completed");
+    }
+    return 0;
 }
 
 int run_writer(
@@ -700,7 +1067,7 @@ int run_reader(
     {
         throw std::runtime_error("cannot create subscriber");
     }
-    ReaderListener listener(dynamic_type, sink, arguments.actor);
+    ReaderListener listener(dynamic_type, sink, arguments.actor, arguments.topic);
     // See PublisherOwner above: callbacks must not outlive their listener.
     SubscriberOwner subscriber_owner(participant, subscriber);
     DataReaderQos reader_qos = DATAREADER_QOS_DEFAULT;
@@ -771,6 +1138,14 @@ int run(
     sink.emit("probe.ready", arguments.actor, "ready",
             ddsleuth::JsonObject().string("endpoint", "participant"));
 
+    if (arguments.mode == "scripted-writer")
+    {
+        return run_scripted_writer(arguments, participant, topic, dynamic_type, sink);
+    }
+    if (arguments.mode == "scripted-reader")
+    {
+        return run_scripted_reader(arguments, participant, topic, dynamic_type, sink);
+    }
     if (arguments.mode == "writer" || arguments.mode == "recreate-writer" ||
             arguments.mode == "check-writer" ||
             arguments.mode == "observe-denied-writer")

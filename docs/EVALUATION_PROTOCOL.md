@@ -33,6 +33,12 @@ makes the trial inconclusive. Infrastructure errors remain separate from semanti
 outcomes. Capability claims require their own events; possession of a token is not by
 itself proof of decryption, forgery, application delivery, or availability impact.
 
+An inconclusive trial may still contain a discovery candidate. Candidate extraction
+operates on the preserved prefix of the runtime trace, records `execution_complete`,
+and lowers confidence when later execution diverges. This does not convert an
+incomplete trial into a vulnerability verdict; it prevents an earlier security signal
+from being discarded by a subsequent barrier or process failure.
+
 ## Repetition and nondeterminism
 
 Exploratory campaigns may use one trial per case. A result intended for disclosure or
@@ -104,6 +110,9 @@ packet-fuzzing baseline under equal wall-clock and compute budgets. Report at le
 - reproduction rate across clean runs;
 - minimization ratio from discovering matrix case to final reproducer;
 - implementation-specific code required outside the shared event/oracle core.
+- candidate precision after manual validation;
+- fraction of candidates that appear only under schedule mutation;
+- validated High/Critical yield per execution-hour.
 
 The primary claim is cross-layer detection, not raw crash count. A crash is counted as
 a security result only after its trust boundary and attacker-controlled input are

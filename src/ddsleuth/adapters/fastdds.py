@@ -316,6 +316,7 @@ class FastDDSAdapter:
             allow_external=allow_external,
             overwrite=overwrite,
             injected_role_environments=role_environments,
+            preserve_partial=True,
         )
         if scenario.execution.log_format == "ddssec-jsonl":
             events = [EvidenceEvent.from_dict(raw) for raw in artifacts.structured_events]
@@ -324,6 +325,18 @@ class FastDDSAdapter:
             events.extend(self._legacy_importer.process_exit_events(artifacts.statuses))
         else:
             events = self._legacy_importer.import_logs(artifacts.logs, artifacts.statuses)
+        if artifacts.error is not None:
+            actor = artifacts.processes[-1].actor
+            events.append(
+                EvidenceEvent(
+                    kind=EventKind.EXECUTION_DIVERGENCE,
+                    actor=actor,
+                    implementation=self.name,
+                    outcome="failed",
+                    attributes=dict(artifacts.error),
+                    source="runner-error.json",
+                )
+            )
         metadata: dict[str, JsonValue] = {
             "implementation_version": scenario.implementation_version,
             "network": scenario.execution.network,
@@ -346,6 +359,8 @@ class FastDDSAdapter:
                 }
             ),
         }
+        if artifacts.error is not None:
+            metadata["execution_error"] = dict(artifacts.error)
         return EvidenceBundle.create(
             run_id=artifacts.run_dir.name,
             scenario_id=scenario.scenario_id,

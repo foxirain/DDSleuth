@@ -1,29 +1,9 @@
 from __future__ import annotations
 
-from fnmatch import fnmatchcase
-
 from ..evidence import EvidenceBundle
 from ..models import AssertionSpec, EventKind, Scenario
+from ..semantics import is_permitted, normalize_operation
 from .base import OracleResult, OracleStatus, event_sequence
-
-
-_OPERATIONS = {
-    "publish": "publish",
-    "create_datawriter": "publish",
-    "write": "publish",
-    "subscribe": "subscribe",
-    "create_datareader": "subscribe",
-    "read": "subscribe",
-}
-
-
-def _is_permitted(scenario: Scenario, actor: str, operation: str, resource: str) -> bool:
-    participant = scenario.participants.get(actor)
-    permission = _OPERATIONS.get(operation)
-    if participant is None or permission is None:
-        return False
-    expressions = participant.permissions.get(permission, ())
-    return any(fnmatchcase(resource, expression) for expression in expressions)
 
 
 class PolicyAuthorizationConsistencyOracle:
@@ -63,16 +43,16 @@ class PolicyAuthorizationConsistencyOracle:
             resource = event.attributes.get("resource")
             if not isinstance(operation, str) or not isinstance(resource, str):
                 continue
-            normalized_operation = _OPERATIONS.get(operation)
+            normalized_operation = normalize_operation(operation)
             if normalized_operation is None:
                 continue
-            if isinstance(selected_operation, str) and normalized_operation != _OPERATIONS.get(
-                selected_operation, selected_operation
+            if isinstance(selected_operation, str) and normalized_operation != (
+                normalize_operation(selected_operation) or selected_operation
             ):
                 continue
             sequence = event_sequence(index, event.sequence)
             considered.append(sequence)
-            if event.outcome == "allowed" and not _is_permitted(
+            if event.outcome == "allowed" and not is_permitted(
                 scenario,
                 event.actor,
                 operation,

@@ -29,7 +29,10 @@ identity and signed-policy materialization.
   evidence and logs.
 - Keep vendor-private types behind an adapter or opt-in instrumentation boundary.
 - Use explicit event barriers for cross-process coordination; do not add timing-only
-  sleeps as causal evidence.
+  sleeps as causal evidence. Launch offsets are exploration mutations, never proof of
+  causality.
+- Keep discovery candidates separate from vulnerability, exploitability, and CVSS
+  claims.
 - Document the supported implementation revision for every source overlay.
 
 Run `./scripts/release-check.sh` before proposing a release-affecting change.

@@ -2,7 +2,7 @@
 
 ## Supported versions
 
-The latest `0.1.0` alpha pre-release is supported. Earlier development snapshots are
+The latest `0.2.0` alpha pre-release is supported. Earlier development snapshots are
 not maintained.
 
 ## Framework vulnerabilities

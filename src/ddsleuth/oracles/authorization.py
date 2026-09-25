@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from ..evidence import EvidenceBundle
 from ..models import AssertionSpec, EventKind, Scenario
+from ..semantics import actor_has_any_permission
 from .base import OracleResult, OracleStatus, event_sequence
 
 
@@ -42,14 +43,20 @@ class UnauthorizedKeyDisclosureOracle:
                 if sender or receiver or observed_user_token:
                     key_events.append((sequence, event))
 
-        if denials and key_events:
+        denied_by_declared_policy = not actor_has_any_permission(
+            scenario,
+            actor,
+            "subscribe",
+        )
+
+        if (denials or denied_by_declared_policy) and key_events:
             first_sequence, first = key_events[0]
             return OracleResult(
                 assertion_id=assertion.assertion_id,
                 oracle=self.name,
                 status=OracleStatus.VIOLATION,
                 summary=(
-                    f"{actor} obtained endpoint key material after access control denied its protected endpoint"
+                    f"{actor} obtained user-endpoint key material despite lacking subscribe authority"
                 ),
                 evidence_events=tuple(denials + [sequence for sequence, _ in key_events]),
                 details={
@@ -64,15 +71,16 @@ class UnauthorizedKeyDisclosureOracle:
                     ),
                     "source_endpoint_guid": first.attributes.get("source_endpoint_guid"),
                     "first_key_event": first_sequence,
+                    "declared_policy_denied": denied_by_declared_policy,
                 },
             )
 
-        if denials:
+        if denials or denied_by_declared_policy:
             return OracleResult(
                 assertion_id=assertion.assertion_id,
                 oracle=self.name,
                 status=OracleStatus.PASS,
-                summary=f"{actor} was denied and no endpoint key material was observed",
+                summary=f"{actor} lacked subscribe authority and no user-endpoint key material was observed",
                 evidence_events=tuple(denials),
             )
 

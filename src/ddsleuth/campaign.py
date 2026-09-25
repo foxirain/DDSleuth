@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from .adapters.fastdds import FastDDSAdapter
+from .candidates import discover_candidates, write_candidates
 from .evidence import load_evidence, write_evidence
 from .identity import IdentityArtifacts, materialize_identities
 from .models import JsonValue, Scenario
@@ -544,6 +545,10 @@ def run_campaign(
                         )
                     report = evaluate(scenario, evidence)
                     write_report(report, report_path)
+                    write_candidates(
+                        discover_candidates(scenario, evidence, report),
+                        run_dir / "candidates.json",
+                    )
                     result = _result_from_report(
                         case,
                         report,
@@ -630,6 +635,10 @@ def run_campaign(
                     write_evidence(evidence, evidence_path)
                     report = evaluate(scenario, evidence)
                     write_report(report, report_path)
+                    write_candidates(
+                        discover_candidates(scenario, evidence, report),
+                        run_dir / "candidates.json",
+                    )
                     result = _result_from_report(
                         case,
                         report,

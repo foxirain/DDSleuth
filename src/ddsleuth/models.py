@@ -29,6 +29,9 @@ class EventKind(StrEnum):
     APPLICATION_WRITE_ATTEMPT = "application.write_attempt"
     APPLICATION_SAMPLE_WRITTEN = "application.sample_written"
     APPLICATION_SAMPLE_RECEIVED = "application.sample_received"
+    ACTION_STARTED = "action.started"
+    ACTION_COMPLETED = "action.completed"
+    EXECUTION_DIVERGENCE = "execution.divergence"
     PROCESS_EXIT = "process.exit"
 
 
@@ -120,11 +123,21 @@ class EventBarrier:
 
 
 @dataclass(frozen=True, slots=True)
+class RoleAction:
+    action_id: str
+    at_ms: float
+    operation: str
+    arguments: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
 class RoleCommand:
     actor: str
     command: tuple[str, ...]
     environment: Mapping[str, str] = field(default_factory=dict)
     start_after: tuple[EventBarrier, ...] = ()
+    start_offset_ms: float = 0.0
+    actions: tuple[RoleAction, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)

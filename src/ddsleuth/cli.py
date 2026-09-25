@@ -13,13 +13,16 @@ from .campaign import (
     PolicyMaterializationConfig,
     run_campaign,
 )
+from .candidates import discover_candidates, write_candidates
 from .evidence import EvidenceBundle, load_evidence, write_evidence
 from .identity import materialize_identities
 from .matrix import parse_dimension, write_matrix
+from .explorer import analyze_exploration
 from .oracles.evaluate import evaluate
 from .policy import materialize_policies
 from .reporting import concise_summary, write_report
 from .scenario import ScenarioError, load_scenario
+from .trajectory import write_trajectory_manifest
 
 
 def _key_value(values: Sequence[str], label: str) -> dict[str, str]:
@@ -77,10 +80,13 @@ def _cmd_evaluate(args: argparse.Namespace) -> int:
     scenario = load_scenario(args.scenario)
     evidence = load_evidence(args.evidence)
     report = evaluate(scenario, evidence)
+    candidates = discover_candidates(scenario, evidence, report)
     if args.output:
         write_report(report, args.output)
     else:
         _write_or_print_json(report.to_dict(), None)
+    if args.candidates_output:
+        write_candidates(candidates, args.candidates_output)
     print(concise_summary(report))
     if report.failed_processes or report.incomplete_processes:
         return 3
@@ -108,9 +114,12 @@ def _cmd_run(args: argparse.Namespace) -> int:
     write_evidence(evidence, evidence_path)
     report = evaluate(scenario, evidence)
     write_report(report, report_path)
+    candidates_path = run_dir / "candidates.json"
+    write_candidates(discover_candidates(scenario, evidence, report), candidates_path)
     print(concise_summary(report))
     print(f"evidence={evidence_path}")
     print(f"report={report_path}")
+    print(f"candidates={candidates_path}")
     if report.failed_processes or report.incomplete_processes:
         return 3
     return 2 if args.fail_on_violation and report.verdict == "violation" else 0
@@ -215,6 +224,76 @@ def _cmd_run_matrix(args: argparse.Namespace) -> int:
     return 2 if args.fail_on_violation and campaign.counts["violation"] else 0
 
 
+def _cmd_explore(args: argparse.Namespace) -> int:
+    environment = dict(os.environ)
+    environment.update(_key_value(args.env, "--env"))
+    if args.materialize_identities and args.materialize_policies:
+        raise ValueError("--materialize-identities and --materialize-policies are mutually exclusive")
+
+    policy_config = None
+    if args.materialize_policies:
+        subjects = _key_value(args.subject, "--subject")
+        if not subjects:
+            raise ValueError("--materialize-policies requires at least one --subject")
+        policy_config = PolicyMaterializationConfig(
+            subject_names=subjects,
+            signer_cert=Path(args.signer_cert) if args.signer_cert else None,
+            signer_key=Path(args.signer_key) if args.signer_key else None,
+            not_before=args.not_before,
+            not_after=args.not_after,
+        )
+    identity_config = None
+    if args.materialize_identities:
+        identity_config = IdentityMaterializationConfig(
+            ca_subject=args.identity_ca_subject,
+            validity_days=args.identity_validity_days,
+        )
+
+    output_root = Path(args.output_root)
+    manifest = write_trajectory_manifest(
+        Path(args.scenario),
+        output_root / "trajectories",
+        dimensions=[parse_dimension(value) for value in args.dimension],
+        dimension_strategy=args.dimension_strategy,
+        spacings_ms=args.spacing_ms or (0, 25, 250),
+        barrier_modes=args.barrier_mode or ("preserve", "relaxed"),
+        budget=args.budget,
+        seed=args.seed,
+        overwrite=args.overwrite or args.resume,
+    )
+    campaign = run_campaign(
+        manifest,
+        output_root / "runs",
+        environment,
+        allow_external=args.allow_external,
+        overwrite=args.overwrite,
+        resume=args.resume,
+        stop_on_error=args.stop_on_error,
+        policy_config=policy_config,
+        identity_config=identity_config,
+        allow_unbound_configuration=args.allow_unbound_configuration,
+        repetitions=args.repetitions,
+    )
+    exploration_path = output_root / "exploration-report.json"
+    exploration = analyze_exploration(
+        manifest,
+        output_root / "runs",
+        campaign,
+        exploration_path,
+    )
+    print(f"trajectories={exploration['generated_trajectories']}")
+    print(f"trials={exploration['expected_trials']}")
+    print(f"analyzed={exploration['analyzed_trials']}")
+    print(f"candidate_clusters={exploration['candidate_cluster_count']}")
+    print(f"high_or_critical_leads={exploration['high_or_critical_leads']}")
+    print(f"report={exploration_path}")
+    if campaign.counts["error"]:
+        return 3
+    if args.fail_on_candidate and exploration["candidate_cluster_count"]:
+        return 2
+    return 0
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="ddsleuth",
@@ -244,6 +323,7 @@ def _build_parser() -> argparse.ArgumentParser:
     evaluate_parser.add_argument("scenario")
     evaluate_parser.add_argument("evidence")
     evaluate_parser.add_argument("--output")
+    evaluate_parser.add_argument("--candidates-output")
     evaluate_parser.add_argument("--fail-on-violation", action="store_true")
     evaluate_parser.set_defaults(handler=_cmd_evaluate)
 
@@ -334,6 +414,48 @@ def _build_parser() -> argparse.ArgumentParser:
         help="allow policy matrix cases to use external policies (diagnostic only)",
     )
     run_matrix.set_defaults(handler=_cmd_run_matrix)
+
+    explore = subparsers.add_parser(
+        "explore",
+        help="discover runtime security candidates across stateful role schedules",
+    )
+    explore.add_argument("scenario")
+    explore.add_argument("--output-root", required=True)
+    explore.add_argument("--budget", type=int, default=64)
+    explore.add_argument("--seed", type=int, default=0)
+    explore.add_argument("--spacing-ms", action="append", type=int)
+    explore.add_argument(
+        "--barrier-mode",
+        action="append",
+        choices=("preserve", "relaxed"),
+    )
+    explore.add_argument("--dimension", action="append", default=[])
+    explore.add_argument(
+        "--dimension-strategy",
+        choices=("cartesian", "pairwise"),
+        default="pairwise",
+    )
+    explore.add_argument("--env", action="append", default=[], metavar="NAME=VALUE")
+    explore.add_argument("--overwrite", action="store_true")
+    explore.add_argument("--resume", action="store_true")
+    explore.add_argument("--stop-on-error", action="store_true")
+    explore.add_argument("--allow-external", action="store_true")
+    explore.add_argument("--fail-on-candidate", action="store_true")
+    explore.add_argument("--repetitions", type=int, default=1)
+    explore.add_argument("--materialize-policies", action="store_true")
+    explore.add_argument("--materialize-identities", action="store_true")
+    explore.add_argument(
+        "--identity-ca-subject",
+        default="/CN=DDSleuth Ephemeral Identity CA",
+    )
+    explore.add_argument("--identity-validity-days", type=int, default=7)
+    explore.add_argument("--subject", action="append", default=[], metavar="ACTOR=SUBJECT_NAME")
+    explore.add_argument("--signer-cert")
+    explore.add_argument("--signer-key")
+    explore.add_argument("--not-before", default="2020-01-01T00:00:00")
+    explore.add_argument("--not-after", default="2038-01-01T00:00:00")
+    explore.add_argument("--allow-unbound-configuration", action="store_true")
+    explore.set_defaults(handler=_cmd_explore)
     return parser
 
 

@@ -81,6 +81,15 @@ class ScenarioTests(unittest.TestCase):
             scenario.execution.roles[1].environment["DDSLEUTH_SAMPLE_COUNT"],
         )
 
+    def test_native_scripted_lifecycle_example_is_valid(self) -> None:
+        scenario = load_scenario(
+            ROOT / "examples/fastdds/native_scripted_lifecycle.json"
+        )
+        writer = scenario.execution.roles[1]
+        self.assertEqual("scripted-writer", writer.command[2])
+        self.assertEqual(7, len(writer.actions))
+        self.assertEqual("endpoint.destroy", writer.actions[3].operation)
+
     def test_duplicate_assertion_id_is_rejected(self) -> None:
         raw = json.loads(
             (ROOT / "examples/fastdds/three_party_recipient_binding.json").read_text()
@@ -95,6 +104,17 @@ class ScenarioTests(unittest.TestCase):
         )
         raw["execution"]["roles"][0]["actor"] = "eve"
         with self.assertRaisesRegex(ScenarioError, "unknown actor"):
+            parse_scenario(raw)
+
+    def test_participant_name_cannot_escape_run_directory(self) -> None:
+        raw = json.loads(
+            (ROOT / "examples/fastdds/three_party_recipient_binding.json").read_text()
+        )
+        participant = raw["participants"].pop("mallory")
+        raw["participants"]["../mallory"] = participant
+        raw["policy"]["grant_order"][0] = "../mallory"
+        raw["execution"]["roles"][0]["actor"] = "../mallory"
+        with self.assertRaisesRegex(ScenarioError, "filesystem-safe"):
             parse_scenario(raw)
 
     def test_barrier_must_reference_earlier_role(self) -> None:
@@ -113,6 +133,35 @@ class ScenarioTests(unittest.TestCase):
         )
         raw["policy"]["grant_order"] = ["mallory", "bob"]
         with self.assertRaisesRegex(ScenarioError, "every participant exactly once"):
+            parse_scenario(raw)
+
+    def test_role_actions_are_parsed_and_ordered(self) -> None:
+        raw = json.loads(
+            (ROOT / "examples/fastdds/three_party_recipient_binding.json").read_text()
+        )
+        raw["execution"]["roles"][0]["actions"] = [
+            {"id": "create", "at_ms": 0, "operation": "endpoint.create"},
+            {
+                "id": "write",
+                "at_ms": 12.5,
+                "operation": "sample.write",
+                "arguments": ["payload"],
+            },
+        ]
+        scenario = parse_scenario(raw)
+        actions = scenario.execution.roles[0].actions
+        self.assertEqual(("create", "write"), tuple(action.action_id for action in actions))
+        self.assertEqual(("payload",), actions[1].arguments)
+
+    def test_role_actions_reject_time_reversal(self) -> None:
+        raw = json.loads(
+            (ROOT / "examples/fastdds/three_party_recipient_binding.json").read_text()
+        )
+        raw["execution"]["roles"][0]["actions"] = [
+            {"id": "later", "at_ms": 10, "operation": "endpoint.create"},
+            {"id": "earlier", "at_ms": 5, "operation": "endpoint.destroy"},
+        ]
+        with self.assertRaisesRegex(ScenarioError, "ordered by at_ms"):
             parse_scenario(raw)
 
 

@@ -23,7 +23,7 @@ fi
 
 rm -rf -- "$artifact_dir"
 mkdir -p "$artifact_dir"
-"$python_bin" -m build --sdist --outdir "$artifact_dir" "$repo_root"
+"$python_bin" -m build --no-isolation --sdist --outdir "$artifact_dir" "$repo_root"
 
 source_archive=$(find "$artifact_dir" -maxdepth 1 -type f -name '*.tar.gz' -print -quit)
 "$python_bin" "$repo_root/scripts/verify_artifacts.py" "$artifact_dir" --sdist-only
@@ -34,7 +34,7 @@ if [[ -z "$source_root" ]]; then
     printf 'source archive did not contain a top-level directory\n' >&2
     exit 1
 fi
-"$python_bin" -m build --wheel --outdir "$artifact_dir" "$source_root"
+"$python_bin" -m build --no-isolation --wheel --outdir "$artifact_dir" "$source_root"
 
 "$python_bin" -m twine check "$artifact_dir"/*
 "$python_bin" "$repo_root/scripts/verify_artifacts.py" "$artifact_dir"

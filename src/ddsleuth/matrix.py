@@ -19,19 +19,23 @@ class MatrixError(ValueError):
 
 @dataclass(frozen=True, slots=True)
 class MatrixDimension:
-    path: tuple[str, ...]
+    path: tuple[str | int, ...]
     values: tuple[JsonValue, ...]
 
     @property
     def dotted_path(self) -> str:
-        return ".".join(self.path)
+        return ".".join(str(component) for component in self.path)
 
 
 def parse_dimension(specification: str) -> MatrixDimension:
     if "=" not in specification:
         raise MatrixError("matrix dimension must use dotted.path=[values]")
     raw_path, raw_values = specification.split("=", 1)
-    path = tuple(part for part in raw_path.split(".") if part)
+    raw_components = tuple(part for part in raw_path.split(".") if part)
+    path = tuple(
+        int(component) if component.isdigit() else component
+        for component in raw_components
+    )
     if not path:
         raise MatrixError("matrix dimension path must not be empty")
     try:
@@ -43,17 +47,46 @@ def parse_dimension(specification: str) -> MatrixDimension:
     return MatrixDimension(path=path, values=tuple(values))
 
 
-def _set_path(document: dict[str, Any], path: tuple[str, ...], value: JsonValue) -> None:
-    current: dict[str, Any] = document
+def _render_path(path: tuple[str | int, ...]) -> str:
+    return ".".join(str(component) for component in path)
+
+
+def _set_path(
+    document: dict[str, Any],
+    path: tuple[str | int, ...],
+    value: JsonValue,
+) -> None:
+    current: Any = document
     for component in path[:-1]:
-        child = current.get(component)
-        if not isinstance(child, dict):
-            raise MatrixError(f"matrix path does not reference an object: {'.'.join(path)}")
+        if isinstance(current, dict) and isinstance(component, str):
+            child = current.get(component)
+        elif isinstance(current, list) and isinstance(component, int):
+            if component >= len(current):
+                raise MatrixError(f"matrix list index is out of range: {_render_path(path)}")
+            child = current[component]
+        else:
+            raise MatrixError(
+                f"matrix path does not reference a compatible container: {_render_path(path)}"
+            )
+        if not isinstance(child, (dict, list)):
+            raise MatrixError(
+                f"matrix path does not reference a container: {_render_path(path)}"
+            )
         current = child
     leaf = path[-1]
-    if leaf not in current:
-        raise MatrixError(f"matrix path does not exist: {'.'.join(path)}")
-    current[leaf] = copy.deepcopy(value)
+    if isinstance(current, dict) and isinstance(leaf, str):
+        if leaf not in current:
+            raise MatrixError(f"matrix path does not exist: {_render_path(path)}")
+        current[leaf] = copy.deepcopy(value)
+        return
+    if isinstance(current, list) and isinstance(leaf, int):
+        if leaf >= len(current):
+            raise MatrixError(f"matrix list index is out of range: {_render_path(path)}")
+        current[leaf] = copy.deepcopy(value)
+        return
+    raise MatrixError(
+        f"matrix path does not reference a compatible value: {_render_path(path)}"
+    )
 
 
 def _slug(value: JsonValue) -> str:

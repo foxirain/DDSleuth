@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -11,6 +12,7 @@ from .models import (
     ExecutionSpec,
     IdentitySpec,
     ParticipantSpec,
+    RoleAction,
     RoleCommand,
     Scenario,
 )
@@ -18,6 +20,9 @@ from .models import (
 
 class ScenarioError(ValueError):
     pass
+
+
+_ACTOR_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
 
 
 def _require_string(raw: Mapping[str, Any], key: str, context: str) -> str:
@@ -64,6 +69,10 @@ def parse_scenario(raw: Mapping[str, Any]) -> Scenario:
     for name, participant_raw in participants_raw.items():
         if not isinstance(name, str) or not isinstance(participant_raw, Mapping):
             raise ScenarioError("each participant must be a named object")
+        if _ACTOR_NAME.fullmatch(name) is None:
+            raise ScenarioError(
+                f"participant name {name!r} must be a filesystem-safe actor identifier"
+            )
         role = _require_string(participant_raw, "role", f"participants.{name}")
         permissions_raw = participant_raw.get("permissions", {})
         if not isinstance(permissions_raw, Mapping):
@@ -192,7 +201,66 @@ def parse_scenario(raw: Mapping[str, Any]) -> Scenario:
                         attributes=dict(attributes),
                     )
                 )
-            roles.append(RoleCommand(actor, command, dict(environment_raw), tuple(barriers)))
+            start_offset_ms = role_raw.get("start_offset_ms", 0)
+            if (
+                not isinstance(start_offset_ms, (int, float))
+                or isinstance(start_offset_ms, bool)
+                or start_offset_ms < 0
+            ):
+                raise ScenarioError(
+                    f"execution.roles[{index}].start_offset_ms must be non-negative"
+                )
+            actions_raw = role_raw.get("actions", [])
+            if not isinstance(actions_raw, list):
+                raise ScenarioError(f"execution.roles[{index}].actions must be an array")
+            actions: list[RoleAction] = []
+            action_ids: set[str] = set()
+            previous_at_ms = -1.0
+            for action_index, action_raw in enumerate(actions_raw):
+                context = f"execution.roles[{index}].actions[{action_index}]"
+                if not isinstance(action_raw, Mapping):
+                    raise ScenarioError(f"{context} must be an object")
+                action_id = _require_string(action_raw, "id", context)
+                if action_id in action_ids:
+                    raise ScenarioError(
+                        f"execution role {actor} contains duplicate action id: {action_id}"
+                    )
+                action_ids.add(action_id)
+                at_ms = action_raw.get("at_ms")
+                if (
+                    not isinstance(at_ms, (int, float))
+                    or isinstance(at_ms, bool)
+                    or at_ms < 0
+                ):
+                    raise ScenarioError(f"{context}.at_ms must be non-negative")
+                if float(at_ms) < previous_at_ms:
+                    raise ScenarioError(
+                        f"execution role {actor} actions must be ordered by at_ms"
+                    )
+                previous_at_ms = float(at_ms)
+                operation = _require_string(action_raw, "operation", context)
+                arguments = _string_list(action_raw.get("arguments", []), f"{context}.arguments")
+                fields = (action_id, operation, *arguments)
+                if any("\t" in value or "\n" in value or "\r" in value for value in fields):
+                    raise ScenarioError(f"{context} fields must not contain tabs or newlines")
+                actions.append(
+                    RoleAction(
+                        action_id=action_id,
+                        at_ms=float(at_ms),
+                        operation=operation,
+                        arguments=arguments,
+                    )
+                )
+            roles.append(
+                RoleCommand(
+                    actor,
+                    command,
+                    dict(environment_raw),
+                    tuple(barriers),
+                    float(start_offset_ms),
+                    tuple(actions),
+                )
+            )
             seen_actors.add(actor)
         execution = ExecutionSpec(network, float(timeout_seconds), log_format, tuple(roles))
 

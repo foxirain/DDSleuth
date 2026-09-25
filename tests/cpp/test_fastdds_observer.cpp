@@ -71,8 +71,18 @@ int main()
     setenv("DDSLEUTH_ACTOR", "alice", 1);
     setenv("DDSLEUTH_FINGERPRINT_SECRET", "4242424242424242424242424242424242424242424242424242424242424242", 1);
 
+    std::vector<uint8_t> key_material;
+    key_material.insert(key_material.end(), {0, 0, 0, 1});
+    key_material.insert(key_material.end(), {0, 0, 0, 16});
+    key_material.insert(key_material.end(), 16, 0x11);
+    key_material.insert(key_material.end(), {0, 0, 0, 1});
+    key_material.insert(key_material.end(), {0, 0, 0, 16});
+    key_material.insert(key_material.end(), 16, 0x22);
+    key_material.insert(key_material.end(), {0, 0, 0, 2});
+    key_material.insert(key_material.end(), {0, 0, 0, 16});
+    key_material.insert(key_material.end(), 16, 0x33);
     const std::vector<FakeToken> tokens{{{
-        FakeProperty("dds.cryp.keymat", {0x10, 0x20, 0x30, 0x40}),
+        FakeProperty("dds.cryp.keymat", key_material),
     }}};
     const FakeGuid local{"local|participant", true};
     const FakeGuid destination_participant{"local|participant", true};

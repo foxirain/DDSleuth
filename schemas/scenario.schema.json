@@ -29,6 +29,9 @@
     "participants": {
       "type": "object",
       "minProperties": 2,
+      "propertyNames": {
+        "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$"
+      },
       "additionalProperties": {
         "type": "object",
         "required": ["role"],
@@ -117,6 +120,27 @@
               "environment": {
                 "type": "object",
                 "additionalProperties": { "type": "string" }
+              },
+              "start_offset_ms": {
+                "type": "number",
+                "minimum": 0
+              },
+              "actions": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "required": ["id", "at_ms", "operation"],
+                  "properties": {
+                    "id": { "type": "string", "minLength": 1 },
+                    "at_ms": { "type": "number", "minimum": 0 },
+                    "operation": { "type": "string", "minLength": 1 },
+                    "arguments": {
+                      "type": "array",
+                      "items": { "type": "string" }
+                    }
+                  },
+                  "additionalProperties": false
+                }
               },
               "start_after": {
                 "type": "array",

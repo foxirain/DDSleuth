@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:ddsleuth:schema:exploration-report:v1",
+  "title": "DDSleuth stateful exploration report",
+  "type": "object",
+  "required": [
+    "schema_version", "exploration_kind", "manifest", "generated_trajectories",
+    "expected_trials", "analyzed_trials", "complete_trials", "infrastructure_errors",
+    "candidate_cluster_count", "high_or_critical_leads", "candidate_clusters"
+  ],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "exploration_kind": { "const": "stateful_runtime_security_discovery" },
+    "manifest": { "type": "string" },
+    "base_scenario": { "type": ["string", "null"] },
+    "seed": { "type": ["integer", "null"] },
+    "budget": { "type": ["integer", "null"] },
+    "generated_trajectories": { "type": "integer", "minimum": 1 },
+    "expected_trials": { "type": "integer", "minimum": 1 },
+    "analyzed_trials": { "type": "integer", "minimum": 0 },
+    "complete_trials": { "type": "integer", "minimum": 0 },
+    "infrastructure_errors": { "type": "integer", "minimum": 0 },
+    "candidate_cluster_count": { "type": "integer", "minimum": 0 },
+    "high_or_critical_leads": { "type": "integer", "minimum": 0 },
+    "candidate_clusters": { "type": "array", "items": { "type": "object" } }
+  },
+  "additionalProperties": false
+}

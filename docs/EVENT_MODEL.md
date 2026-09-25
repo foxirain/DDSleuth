@@ -65,6 +65,9 @@ must not be used for cross-process lifecycle ordering claims.
 | `application.write_attempt` | A sample was fully populated and is about to enter the DDS write call |
 | `application.sample_written` | The DDS write call returned success |
 | `application.sample_received` | A real application endpoint returned the sample |
+| `action.started` | A runner-planned adapter action began |
+| `action.completed` | A runner-planned adapter action completed |
+| `execution.divergence` | The scheduler preserved a partial trace after timeout, barrier failure, or role failure |
 | `process.exit` | A scenario role completed or failed |
 
 The schemas under `schemas/` define the machine-readable envelope. Event-specific attribute schemas will be versioned separately as native adapters are added.
@@ -104,6 +107,15 @@ traffic cannot be mistaken for disclosure of a denied application endpoint key.
 Key-scope assertions should likewise select `observation_phase=received` and
 `endpoint_class=user` when the invariant is recipient separation for application
 endpoints; builtin crypto endpoints intentionally follow different key-sharing rules.
+The observer also emits one fingerprint per semantic key component:
+`material_semantics=common_sender` for authority intentionally shared by all intended
+receivers and `material_semantics=recipient_specific` for pair-specific origin
+authentication material. Recipient-scope comparison ignores the common component.
+For received user-endpoint material, token direction determines the required local
+authority: a `datawriter` token is consumed by a subscriber, while a `datareader`
+token is consumed by a publisher. Candidate extraction applies `subscribe` and
+`publish` policy checks respectively; receiving a remote reader token is not, by
+itself, evidence that a writer gained read access.
 
 `application.write_attempt` and `application.sample_written` are deliberately distinct.
 A reader callback may run on another thread before `DataWriter::write()` returns, so a
@@ -111,3 +123,9 @@ receive event may legitimately precede `application.sample_written`. Cross-proce
 causality should use the attempt event and correlate `sample_index` plus `message` (or
 an adapter-specific opaque sample identifier), not assume that log line order grouped
 by process is causal order.
+
+`action.started` and `action.completed` bracket one adapter action from the
+runner-generated plan. They contain the action id, adapter-owned operation name, and
+declared relative timestamp. These events are execution context rather than security
+conclusions; endpoint, authorization, key, and application events produced between
+them remain the evidence consumed by security invariants.

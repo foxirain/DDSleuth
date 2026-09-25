@@ -2,14 +2,16 @@
 
 ## Thesis
 
-Security faults in DDS implementations can be found systematically by generating multi-principal policy topologies and checking cross-layer invariants between authorization policy, logical token destination, cryptographic recipient, key lifecycle, wire identity, and application-visible effects.
+Security faults that static analysis misses can be found systematically by exploring
+multi-principal runtime trajectories and checking temporal, authorization, key-routing,
+lifecycle, and application-delivery invariants across distributed state transitions.
 
 ## Research questions
 
-1. Which policy and recipient-binding flaws are missed by conventional static analysis and packet fuzzing?
+1. Which state-, timing-, and order-dependent security faults are missed by conventional static analysis and packet fuzzing?
 2. How much of one invariant suite can be reused across independent DDS Security implementations?
 3. Which topology, lifecycle, and interoperability mutations expose the most security boundary violations?
-4. How reliably can an unexpected token or key be escalated into demonstrated confidentiality, integrity, or availability impact?
+4. Which runtime signals most reliably predict a later validated High/Critical finding?
 5. What false-positive and nondeterminism rates result from each observation mode?
 
 ## Milestones
@@ -44,6 +46,20 @@ Security faults in DDS implementations can be found systematically by generating
 - Authorized late join, reconnect, credential expiration, and revocation.
 - Unicast and multicast recipient sets.
 
+### M3.5 — Stateful discovery engine
+
+- [x] Deterministic role-order, barrier-mode, and launch-spacing trajectories.
+- [x] Preserve partial security traces after process and barrier divergence.
+- [x] Extract policy overgrant, unauthorized delivery, user-key route, temporal,
+  and execution-divergence candidates independently of trial verdict.
+- [x] Cluster candidates across schedules and rank schedule-sensitive leads.
+- [x] Split common sender and recipient-specific Fast DDS key semantics.
+- [x] Vendor-neutral timed role actions with a Fast DDS executor for endpoint create,
+  match, write/wait, destroy, and recreation inside one long-lived participant.
+- Extend the action protocol to participant reconnect, credential revocation, explicit
+  rekey, replay, and controlled transport faults.
+- Coverage feedback over semantic state transitions rather than source lines alone.
+
 ### M4 — Second implementation
 
 - Add a Cyclone DDS adapter.
@@ -61,6 +77,7 @@ Security faults in DDS implementations can be found systematically by generating
 - Known-vulnerability and seeded-bug benchmark corpus.
 - Detection, false-positive, repeatability, and minimization measurements.
 - Comparison with static analysis and protocol fuzzing baselines.
+- Candidate precision, schedule sensitivity, and validated High/Critical yield.
 - Reproducible containers and paper artifact.
 
 ## Publication gates

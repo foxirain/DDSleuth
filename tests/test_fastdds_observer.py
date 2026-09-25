@@ -59,12 +59,14 @@ class FastDDSObserverTests(unittest.TestCase):
             for line in completed.stderr.splitlines()
             if line.startswith("DDSLEUTH_EVENT ")
         ]
-        self.assertEqual(5, len(events))
+        self.assertEqual(7, len(events))
         self.assertEqual(
             [
                 "crypto_token.generated",
                 "key_material.observed",
+                "key_material.observed",
                 "crypto_token.observed",
+                "key_material.observed",
                 "key_material.observed",
                 "key.rotated",
             ],
@@ -75,8 +77,11 @@ class FastDDSObserverTests(unittest.TestCase):
             for event in events
             if event["kind"] == "key_material.observed"
         ]
-        self.assertEqual(fingerprints[0], fingerprints[1])
+        self.assertEqual(fingerprints[0], fingerprints[2])
+        self.assertEqual(fingerprints[1], fingerprints[3])
         self.assertTrue(fingerprints[0].startswith("hmac-sha256-run-local-v1:"))
+        self.assertEqual("sender", events[1]["attributes"]["key_class"])
+        self.assertEqual("receiver_specific", events[2]["attributes"]["key_class"])
         self.assertEqual("alice", events[0]["actor"])
         self.assertEqual("user", events[0]["attributes"]["endpoint_class"])
         self.assertEqual("serialized_payload", events[-1]["attributes"]["context"])

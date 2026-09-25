@@ -5,9 +5,9 @@ import sys
 import unittest
 from pathlib import Path
 
-from ddsleuth.models import EventBarrier, ExecutionSpec, RoleCommand
+from ddsleuth.models import EventBarrier, ExecutionSpec, RoleAction, RoleCommand
 from ddsleuth.fingerprints import FINGERPRINT_ENVIRONMENT
-from ddsleuth.runner import RunnerError, run_processes
+from ddsleuth.runner import ACTION_PLAN_ENVIRONMENT, RunnerError, run_processes
 
 
 class RunnerTests(unittest.TestCase):
@@ -61,6 +61,68 @@ class RunnerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             with self.assertRaisesRegex(RunnerError, "may not override"):
                 run_processes(execution, Path(directory))
+
+    def test_runner_materializes_and_injects_action_plan(self) -> None:
+        script = (
+            "import os, pathlib; "
+            "print(pathlib.Path(os.environ['DDSLEUTH_ACTION_PLAN']).read_text(), end='')"
+        )
+        execution = ExecutionSpec(
+            network="loopback",
+            timeout_seconds=5,
+            log_format="ddssec-jsonl",
+            roles=(
+                RoleCommand(
+                    actor="alice",
+                    command=(sys.executable, "-c", script),
+                    actions=(
+                        RoleAction("create", 0, "endpoint.create", ("writer",)),
+                        RoleAction("write", 25.5, "sample.write", ("payload",)),
+                    ),
+                ),
+            ),
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            artifacts = run_processes(execution, Path(directory))
+            expected = (
+                "# ddsleuth-action-plan-v1\n"
+                "0\tcreate\tendpoint.create\twriter\n"
+                "25.5\twrite\tsample.write\tpayload\n"
+            )
+            self.assertEqual(expected, artifacts.logs["alice"].read_text())
+            self.assertEqual(expected, (Path(directory) / "alice.actions.tsv").read_text())
+
+    def test_role_cannot_replace_runner_action_plan(self) -> None:
+        execution = ExecutionSpec(
+            network="loopback",
+            timeout_seconds=1,
+            log_format="ddssec-jsonl",
+            roles=(
+                RoleCommand(
+                    actor="mallory",
+                    command=("/bin/true",),
+                    environment={ACTION_PLAN_ENVIRONMENT: "/tmp/spoofed"},
+                ),
+            ),
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertRaisesRegex(RunnerError, "runner-generated action plan"):
+                run_processes(execution, Path(directory))
+
+    def test_global_environment_cannot_inject_action_plan(self) -> None:
+        execution = ExecutionSpec(
+            network="loopback",
+            timeout_seconds=1,
+            log_format="ddssec-jsonl",
+            roles=(RoleCommand(actor="mallory", command=("/bin/true",)),),
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertRaisesRegex(RunnerError, "runner-reserved"):
+                run_processes(
+                    execution,
+                    Path(directory),
+                    {ACTION_PLAN_ENVIRONMENT: "/tmp/spoofed"},
+                )
 
     def test_runner_binds_actor_environment(self) -> None:
         execution = ExecutionSpec(
@@ -133,6 +195,35 @@ class RunnerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             with self.assertRaisesRegex(RunnerError, "exited before emitting"):
                 run_processes(execution, Path(directory))
+
+    def test_partial_mode_preserves_events_before_barrier_failure(self) -> None:
+        event = (
+            'DDSLEUTH_EVENT {"kind":"access_control.decision","actor":"first",'
+            '"implementation":"test","outcome":"allowed","attributes":{}}'
+        )
+        execution = ExecutionSpec(
+            network="loopback",
+            timeout_seconds=2,
+            log_format="ddssec-jsonl",
+            roles=(
+                RoleCommand(actor="first", command=("/bin/echo", event)),
+                RoleCommand(
+                    actor="second",
+                    command=("/bin/true",),
+                    start_after=(EventBarrier(actor="first", kind="probe.ready"),),
+                ),
+            ),
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            artifacts = run_processes(
+                execution,
+                Path(directory),
+                preserve_partial=True,
+            )
+            self.assertIsNotNone(artifacts.error)
+            self.assertEqual(("first",), tuple(item.actor for item in artifacts.processes))
+            self.assertEqual(1, len(artifacts.structured_events))
+            self.assertTrue((Path(directory) / "runner-error.json").is_file())
 
 
 if __name__ == "__main__":

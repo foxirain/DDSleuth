@@ -1,30 +1,44 @@
 # DDSleuth
 
-**Cross-layer security invariant testing for DDS.**
+**Stateful runtime security discovery for DDS.**
 
 [![CI](https://github.com/foxirain/DDSleuth/actions/workflows/ci.yml/badge.svg)](https://github.com/foxirain/DDSleuth/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.11%2B-blue.svg)](pyproject.toml)
 
-DDSleuth is an experimental, policy-aware framework for testing security invariants
-across DDS participants, security plugins, RTPS traffic, and application-visible
-effects.
+DDSleuth is an experimental, runtime-first framework for discovering security faults
+that emerge across DDS protocol state, participant order, endpoint lifecycle,
+authorization, key distribution, and application-visible delivery. It explores
+distributed execution trajectories and ranks anomalous traces for later human or LLM
+investigation.
 
 > **Alpha status:** DDSleuth is a research instrument, not a production security
 > control. Its checked-in scenarios are designed for authorized, isolated test
 > environments.
 
-The project starts with Fast DDS because we have a complete three-participant reference experiment that crosses the entire path from signed Governance and Permissions documents through CryptoToken delivery, protected RTPS traffic, and a real application `DataReader`. The core event model and invariant engine are vendor-neutral; implementation-specific behavior belongs behind adapters.
+The project starts with Fast DDS because its reference experiments cross the entire
+runtime path from signed Governance and Permissions documents through CryptoToken
+delivery, protected RTPS traffic, and a real application `DataReader`. The trajectory,
+event, semantic, and candidate models are vendor-neutral; implementation-specific
+observation belongs behind adapters.
 
-## What this project tests
+## What this project discovers
 
-Traditional static analysis inspects one codebase. DDSleuth instead executes multiple principals with deliberately different permissions and checks relationships that span processes and protocol layers:
+Static analysis and LLM code review already inspect individual source paths well.
+DDSleuth targets the complementary state space: it executes multiple principals with
+different permissions, perturbs their order and timing, and checks relationships that
+exist only across processes and protocol phases:
 
 - the logical destination inside a security message must match its cryptographic and network recipient;
 - a participant denied access to a topic must not receive key material that grants access to that topic;
 - keys for one participant, endpoint, topic, or domain must not authorize another;
 - revocation, rematching, rekeying, and endpoint recreation must not preserve stale authority;
-- an unexpected token or key is escalated only when its real decrypt, forge, or application-delivery capability is demonstrated.
+- the same semantic experiment must not change security behavior solely because join
+  order, delay, reconnect, revocation, or lifecycle interleaving changed.
+
+DDSleuth stops at a ranked, replayable runtime candidate. Exploit construction,
+source-to-sink proof, RCE development, and advisory writing are deliberately outside
+the core; a researcher or LLM can perform those tasks after discovery.
 
 ## Current milestone
 
@@ -32,7 +46,12 @@ The Fast DDS vertical slice now includes scenario and evidence schemas, ephemera
 identity generation, signed Governance and Permissions generation, structured native
 events, event-driven process barriers, run-local key fingerprints, fail-closed
 invariant evaluation, Cartesian and pairwise matrices, resumable repeated campaigns,
-configuration and executable provenance, and reliability summaries. The legacy
+configuration and executable provenance, reliability summaries, stateful trajectory
+generation, partial-trace preservation, semantic candidate extraction, and
+schedule-sensitive candidate clustering. A vendor-neutral timed action-plan model
+now lets a long-lived role create, wait on, use, destroy, and recreate endpoints;
+the Fast DDS native probe executes those plans without baking a lifecycle sequence
+into the framework. The legacy
 three-party Fast DDS harness remains a private golden regression case; no
 finding-specific trigger or unpatched exploit module is embedded in the public core.
 
@@ -41,7 +60,9 @@ token-route consistency, authorization isolation, policy overgrant, key-scope
 separation, endpoint key freshness after destruction/recreation, post-revocation
 authority reuse, session-key rotation delivery, observer health, and
 application-visible writer impersonation.
-Capability scoring is kept separate from root-cause classification.
+Capability scoring is kept separate from root-cause classification. Common sender key
+material and recipient-specific key material are fingerprinted independently so
+legitimate multi-recipient key sharing is not promoted into a false finding.
 
 ## Quick start
 
@@ -125,6 +146,52 @@ Repeated campaigns retain every trial and report per-scenario violation rates, W
 95% intervals, and mixed-outcome (`flaky`) status instead of collapsing an intermittent
 result into one pass/fail bit.
 
+Explore stateful role schedules directly:
+
+```sh
+export DDSLEUTH_FASTDDS_NATIVE_PROBE=/path/to/ddsleuth_fastdds_observed_probe
+
+ddsleuth explore \
+  examples/fastdds/native_late_denied_join.json \
+  --output-root .runs/late-join-exploration \
+  --materialize-identities \
+  --budget 24 \
+  --spacing-ms 0 \
+  --spacing-ms 25 \
+  --spacing-ms 250 \
+  --barrier-mode preserve \
+  --barrier-mode relaxed
+```
+
+`preserve` trajectories retain causal event barriers while varying launch offsets.
+`relaxed` trajectories remove those baseline constraints and explore participant start
+orders and spacings. One zero-offset, barrier-preserving baseline is always retained,
+even when only relaxed mutations or nonzero spacings are requested; the remaining
+budget is selected deterministically from the configured seed. Every trial writes
+`evidence.json`, `report.json`, and `candidates.json`. The top-level
+`exploration-report.json` clusters stable semantic fingerprints, reports occurrence
+rates, and marks candidates that exist only under a mutated schedule. A later barrier
+failure or role exit does not erase an earlier security divergence.
+
+Roles may also declare an ordered `actions` array. The runner validates it, writes a
+versioned tab-separated plan inside the isolated run directory, and injects only that
+runner-generated path into the process. For example:
+
+```json
+"actions": [
+  {"id": "create-1", "at_ms": 0, "operation": "endpoint.create"},
+  {"id": "match-1", "at_ms": 0, "operation": "endpoint.wait_match"},
+  {"id": "write-1", "at_ms": 0, "operation": "sample.write"},
+  {"id": "destroy-1", "at_ms": 25, "operation": "endpoint.destroy"},
+  {"id": "create-2", "at_ms": 50, "operation": "endpoint.create"}
+]
+```
+
+Action timestamps and arguments are ordinary scenario fields, so matrix dimensions
+such as `execution.roles.1.actions.3.at_ms=[5,25,45]` can explore lifecycle timing
+without adding a new probe mode for every sequence. Actions with equal timestamps keep
+their declared order. See `native_scripted_lifecycle.json` for a complete live case.
+
 To run a local Fast DDS golden harness, provide the executable, certificate directory, and signed policy directory through environment variables:
 
 ```sh
@@ -137,7 +204,8 @@ ddsleuth run \
   --run-dir .runs/fastdds-recipient-binding
 ```
 
-The run directory contains per-role logs, `evidence.json`, and `report.json`.
+The run directory contains per-role logs, `evidence.json`, `report.json`, and
+`candidates.json`.
 
 The public native probe under `probes/fastdds_native/` provides a non-exploit secure
 reader/writer driver. It consumes generated identities and policies, emits structured
@@ -155,9 +223,10 @@ source-context drift must be reviewed rather than fuzzily patched. Run
 checkout.
 
 Public Fast DDS scenarios now include benign delivery, exact key distribution, a live
-denied participant, two authorized recipients, writer endpoint recreation, and a
-denied participant that joins after protected traffic has already flowed, and forced
-session-key rotation under continuous protected delivery. The
+denied participant, two authorized recipients, writer endpoint recreation, a denied
+participant that joins after protected traffic has already flowed, forced session-key
+rotation under continuous protected delivery, and an action-plan-driven writer
+lifecycle. The
 recreation scenario deletes and recreates a real writer inside one participant,
 requires two application deliveries, and checks that user-endpoint key fingerprints
 are disjoint across the destruction boundary. The late-join scenario keeps the real
