@@ -64,6 +64,24 @@
           "violation_rate", "violation_rate_wilson_95", "flaky"
         ]
       }
+    },
+    "selection": {
+      "type": "object",
+      "required": [
+        "strategy", "seed", "pool_size", "execution_budget", "selected_cases",
+        "covered_static_features", "covered_runtime_features", "selection_trace"
+      ],
+      "properties": {
+        "strategy": { "const": "runtime-coverage-guided" },
+        "seed": { "type": "integer" },
+        "pool_size": { "type": "integer", "minimum": 1 },
+        "execution_budget": { "type": "integer", "minimum": 1 },
+        "selected_cases": { "type": "integer", "minimum": 0 },
+        "covered_static_features": { "type": "integer", "minimum": 0 },
+        "covered_runtime_features": { "type": "integer", "minimum": 0 },
+        "selection_trace": { "type": "array", "items": { "type": "object" } }
+      },
+      "additionalProperties": false
     }
   },
   "additionalProperties": false

@@ -26,6 +26,15 @@ class EventKind(StrEnum):
     ENDPOINT_CREATED = "endpoint.created"
     ENDPOINT_DESTROYED = "endpoint.destroyed"
     ENDPOINT_RECREATED = "endpoint.recreated"
+    PARTICIPANT_DISCONNECTED = "participant.disconnected"
+    PARTICIPANT_RECONNECTED = "participant.reconnected"
+    CREDENTIAL_AUTHENTICATED = "credential.authenticated"
+    CREDENTIAL_REVOKED = "credential.revoked"
+    TRANSPORT_FAULT_ARMED = "transport.fault_armed"
+    TRANSPORT_DATAGRAM_DROPPED = "transport.datagram_dropped"
+    TRANSPORT_DATAGRAM_DELAYED = "transport.datagram_delayed"
+    TRANSPORT_DATAGRAM_DUPLICATED = "transport.datagram_duplicated"
+    TRANSPORT_DATAGRAM_REPLAYED = "transport.datagram_replayed"
     APPLICATION_WRITE_ATTEMPT = "application.write_attempt"
     APPLICATION_SAMPLE_WRITTEN = "application.sample_written"
     APPLICATION_SAMPLE_RECEIVED = "application.sample_received"
@@ -97,6 +106,7 @@ class EvidenceEvent:
 @dataclass(frozen=True, slots=True)
 class IdentitySpec:
     subject: str
+    expires_after_seconds: int | None = None
 
 
 @dataclass(frozen=True, slots=True)

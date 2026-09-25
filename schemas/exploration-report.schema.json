@@ -22,7 +22,9 @@
     "infrastructure_errors": { "type": "integer", "minimum": 0 },
     "candidate_cluster_count": { "type": "integer", "minimum": 0 },
     "high_or_critical_leads": { "type": "integer", "minimum": 0 },
-    "candidate_clusters": { "type": "array", "items": { "type": "object" } }
+    "candidate_clusters": { "type": "array", "items": { "type": "object" } },
+    "execution_budget": { "type": ["integer", "null"], "minimum": 1 },
+    "coverage_guidance": { "type": ["object", "null"] }
   },
   "additionalProperties": false
 }

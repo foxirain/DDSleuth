@@ -351,6 +351,11 @@ class FastDDSAdapter:
                 }
                 for process in artifacts.processes
             },
+            "transport_fault_libraries": {
+                process.actor: dict(process.transport_fault_library)
+                for process in artifacts.processes
+                if process.transport_fault_library is not None
+            },
             "configuration_binding": dict(
                 configuration_binding
                 or {

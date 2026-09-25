@@ -22,7 +22,18 @@ Python pre-release spelling used for packages (`0.1.0a1`) and a human-readable G
 - collapse identical token-route retransmissions during schedule differencing so
   reliable-transport retries do not become security candidates;
 - add validated, runner-materialized timed role action plans and Fast DDS scripted
-  endpoint lifecycle execution inside long-lived secure participants.
+  endpoint lifecycle execution inside long-lived secure participants;
+- add real secure-participant disconnect/reconnect and pre/post delivery scenarios;
+- generate second-granularity expiring test certificates and observe public Fast DDS
+  credential invalidation callbacks;
+- extend the revision-pinned observer with remote-revocation and successful
+  participant master-key rekey evidence;
+- add a loopback-only UDP fault shim for drop, delay, duplication, and exact wire replay,
+  with library provenance bound into evidence;
+- add runtime semantic state/transition coverage and feedback-guided selection from a
+  trajectory pool, including stable order-preserving action timing jitter;
+- promote only correlated post-revocation application delivery—not a local write
+  attempt—into a critical discovery lead.
 
 ## 0.1.0-alpha.1 — 2026-09-26
 

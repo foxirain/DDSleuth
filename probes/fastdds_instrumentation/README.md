@@ -11,9 +11,12 @@ plugin. That keeps the protocol path, access-control decisions, key factory, and
 encoding under test unchanged. `fastdds-f6376882-ddsleuth-observer.patch` adds six
 CryptoToken observation calls—both normal discovery and redistribution paths for
 outbound DataWriter/DataReader token creation, plus inbound addressed
-DataWriter/DataReader token dispatch—and one session-rotation observation in the
-serialized-payload transform. Rotation evidence contains session identifiers and the
-configured block threshold, never a session or master key.
+DataWriter/DataReader token dispatch—one session-rotation observation in the
+serialized-payload transform, and lifecycle observations around identity invalidation
+and successful participant master-key regeneration. Rotation evidence contains
+session identifiers, cause, and configured block threshold, never a session or master
+key. Revocation is still triggered by Fast DDS's certificate-expiry machinery; the
+observer does not provide a synthetic revoke control path.
 
 The supported source revision is exactly
 [`f6376882050013616d1b0aeacaca2ccc9ee06874`](https://github.com/eProsima/Fast-DDS/commit/f6376882050013616d1b0aeacaca2ccc9ee06874)

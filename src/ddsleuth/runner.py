@@ -19,6 +19,8 @@ from .fingerprints import FINGERPRINT_ENVIRONMENT
 
 ACTION_PLAN_ENVIRONMENT = "DDSLEUTH_ACTION_PLAN"
 ACTION_PLAN_HEADER = "# ddsleuth-action-plan-v1"
+TRANSPORT_FAULT_LIBRARY_ENVIRONMENT = "DDSLEUTH_TRANSPORT_FAULT_LIBRARY"
+TRANSPORT_FAULT_ENABLE_ENVIRONMENT = "DDSLEUTH_TRANSPORT_FAULTS"
 
 
 class RunnerError(RuntimeError):
@@ -34,6 +36,7 @@ class ProcessRun:
     executable_name: str
     executable_sha256: str
     executable_size: int
+    transport_fault_library: Mapping[str, JsonValue] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -95,6 +98,37 @@ def _write_action_plan(role: RoleCommand, run_dir: Path) -> Path | None:
     return path
 
 
+def _uses_transport_faults(role: RoleCommand) -> bool:
+    return any(action.operation.startswith("transport.") for action in role.actions)
+
+
+def _transport_fault_provenance(
+    role: RoleCommand,
+    execution: ExecutionSpec,
+    environment: Mapping[str, str],
+) -> tuple[Path, dict[str, JsonValue]] | None:
+    if not _uses_transport_faults(role):
+        return None
+    if execution.network != "loopback":
+        raise RunnerError("transport fault actions are restricted to loopback scenarios")
+    raw_path = environment.get(TRANSPORT_FAULT_LIBRARY_ENVIRONMENT)
+    if not raw_path:
+        raise RunnerError(
+            f"role {role.actor} uses transport fault actions but "
+            f"{TRANSPORT_FAULT_LIBRARY_ENVIRONMENT} is not set"
+        )
+    path = Path(raw_path)
+    try:
+        resolved = path.resolve(strict=True)
+    except OSError as error:
+        raise RunnerError(f"cannot resolve transport fault library {path}: {error}") from error
+    if not resolved.is_file():
+        raise RunnerError(f"transport fault library is not a file: {resolved}")
+    size = resolved.stat().st_size
+    digest = hashlib.sha256(resolved.read_bytes()).hexdigest()
+    return resolved, {"name": resolved.name, "sha256": digest, "size": size}
+
+
 def run_processes(
     execution: ExecutionSpec,
     run_dir: Path,
@@ -120,10 +154,15 @@ def run_processes(
         raise RunnerError(
             f"{ACTION_PLAN_ENVIRONMENT} is runner-reserved and cannot be supplied globally"
         )
+    if environment is not None and TRANSPORT_FAULT_ENABLE_ENVIRONMENT in environment:
+        raise RunnerError(
+            f"{TRANSPORT_FAULT_ENABLE_ENVIRONMENT} is runner-reserved and cannot be supplied globally"
+        )
     base_environment = dict(os.environ)
     # Never inherit a stale plan path from the parent shell. A plan exists only
     # when it was derived from this run's digested scenario.
     base_environment.pop(ACTION_PLAN_ENVIRONMENT, None)
+    base_environment.pop(TRANSPORT_FAULT_ENABLE_ENVIRONMENT, None)
     base_environment.update(environment or {})
     base_environment["DDSLEUTH_RUN_DIR"] = str(run_dir)
     base_environment[FINGERPRINT_ENVIRONMENT] = secrets.token_hex(32)
@@ -144,6 +183,7 @@ def run_processes(
             subprocess.Popen[bytes],
             object,
             tuple[str, str, int],
+            Mapping[str, JsonValue] | None,
         ]
     ] = []
     monitor = StructuredLogMonitor()
@@ -160,13 +200,21 @@ def run_processes(
                 raise RunnerError(
                     f"role {role.actor} may not override its runner-generated action plan"
                 )
+            if TRANSPORT_FAULT_ENABLE_ENVIRONMENT in role.environment:
+                raise RunnerError(
+                    f"role {role.actor} may not override runner-controlled transport faults"
+                )
+            if TRANSPORT_FAULT_LIBRARY_ENVIRONMENT in role.environment:
+                raise RunnerError(
+                    f"role {role.actor} may not select its own transport fault library"
+                )
             if role.start_after:
                 try:
                     wait_for_barriers(
                         role.start_after,
                         monitor,
-                        {actor: log for actor, _, log, _, _, _ in active},
-                        {actor: process for actor, _, _, process, _, _ in active},
+                        {actor: log for actor, _, log, _, _, _, _ in active},
+                        {actor: process for actor, _, _, process, _, _, _ in active},
                         deadline,
                     )
                 except CoordinationError as error:
@@ -174,7 +222,7 @@ def run_processes(
             launch_at = scenario_started + role.start_offset_ms / 1000.0
             while time.monotonic() < launch_at:
                 try:
-                    monitor.poll({actor: log for actor, _, log, _, _, _ in active})
+                    monitor.poll({actor: log for actor, _, log, _, _, _, _ in active})
                 except CoordinationError as error:
                     raise RunnerError(str(error)) from error
                 if time.monotonic() >= deadline:
@@ -197,6 +245,14 @@ def run_processes(
             action_plan = _write_action_plan(role, run_dir)
             if action_plan is not None:
                 role_environment[ACTION_PLAN_ENVIRONMENT] = str(action_plan)
+            transport_fault = _transport_fault_provenance(role, execution, role_environment)
+            if transport_fault is not None:
+                library, _ = transport_fault
+                existing_preload = role_environment.get("LD_PRELOAD", "")
+                role_environment["LD_PRELOAD"] = (
+                    f"{existing_preload}:{library}" if existing_preload else str(library)
+                )
+                role_environment[TRANSPORT_FAULT_ENABLE_ENVIRONMENT] = "1"
             command = tuple(
                 _expand(value, role_environment, f"command for {role.actor}")
                 for value in role.command
@@ -218,11 +274,19 @@ def run_processes(
             except Exception:
                 log_handle.close()
                 raise
-            active.append((role.actor, command, log_path, process, log_handle, provenance))
+            active.append((
+                role.actor,
+                command,
+                log_path,
+                process,
+                log_handle,
+                provenance,
+                transport_fault[1] if transport_fault is not None else None,
+            ))
 
-        while any(process.poll() is None for _, _, _, process, _, _ in active):
+        while any(process.poll() is None for _, _, _, process, _, _, _ in active):
             try:
-                monitor.poll({actor: log for actor, _, log, _, _, _ in active})
+                monitor.poll({actor: log for actor, _, log, _, _, _, _ in active})
             except CoordinationError as error:
                 raise RunnerError(str(error)) from error
             if time.monotonic() >= deadline:
@@ -230,7 +294,7 @@ def run_processes(
             time.sleep(0.05)
 
         try:
-            monitor.poll({actor: log for actor, _, log, _, _, _ in active})
+            monitor.poll({actor: log for actor, _, log, _, _, _, _ in active})
         except CoordinationError as error:
             raise RunnerError(str(error)) from error
 
@@ -240,17 +304,17 @@ def run_processes(
         partial_error = error
     finally:
         if partial_error is not None:
-            for _, _, _, process, _, _ in active:
+            for _, _, _, process, _, _, _ in active:
                 if process.poll() is None:
                     process.terminate()
-            for _, _, _, process, _, _ in active:
+            for _, _, _, process, _, _, _ in active:
                 if process.poll() is None:
                     try:
                         process.wait(timeout=3)
                     except subprocess.TimeoutExpired:
                         process.kill()
                         process.wait()
-        for _, _, _, process, log_handle, _ in active:
+        for _, _, _, process, log_handle, _, _ in active:
             if process.poll() is None:
                 process.kill()
                 process.wait()
@@ -258,7 +322,7 @@ def run_processes(
 
     if partial_error is not None:
         try:
-            monitor.poll({actor: log for actor, _, log, _, _, _ in active})
+            monitor.poll({actor: log for actor, _, log, _, _, _, _ in active})
         except CoordinationError:
             pass
 
@@ -271,8 +335,9 @@ def run_processes(
             provenance[0],
             provenance[1],
             provenance[2],
+            transport_fault,
         )
-        for actor, command, log_path, process, _, provenance in active
+        for actor, command, log_path, process, _, provenance, transport_fault in active
     )
     status_path = run_dir / "process-status.json"
     status_path.write_text(

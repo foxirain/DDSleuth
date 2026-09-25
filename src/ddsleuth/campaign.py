@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from .adapters.fastdds import FastDDSAdapter
+from .campaign_types import ManifestCase
 from .candidates import discover_candidates, write_candidates
 from .evidence import load_evidence, write_evidence
 from .identity import IdentityArtifacts, materialize_identities
@@ -37,15 +38,6 @@ class PolicyMaterializationConfig:
 class IdentityMaterializationConfig:
     ca_subject: str = "/CN=DDSleuth Ephemeral Identity CA"
     validity_days: int = 7
-
-
-@dataclass(frozen=True, slots=True)
-class ManifestCase:
-    index: int
-    scenario_id: str
-    scenario_digest: str
-    scenario_path: Path
-    assignments: Mapping[str, JsonValue]
 
 
 @dataclass(frozen=True, slots=True)
@@ -100,9 +92,10 @@ class CampaignReport:
     counts: Mapping[str, int]
     cases: tuple[CampaignCaseResult, ...]
     scenario_summaries: tuple[Mapping[str, JsonValue], ...]
+    selection: Mapping[str, JsonValue] | None = None
 
     def to_dict(self) -> dict[str, JsonValue]:
-        return {
+        value: dict[str, JsonValue] = {
             "schema_version": self.schema_version,
             "manifest_digest": self.manifest_digest,
             "case_count": self.case_count,
@@ -112,6 +105,9 @@ class CampaignReport:
             "cases": [case.to_dict() for case in self.cases],
             "scenario_summaries": [dict(summary) for summary in self.scenario_summaries],
         }
+        if self.selection is not None:
+            value["selection"] = dict(self.selection)
+        return value
 
 
 def _canonical_digest(value: Mapping[str, Any]) -> str:
@@ -491,6 +487,9 @@ def run_campaign(
     identity_config: IdentityMaterializationConfig | None = None,
     allow_unbound_configuration: bool = False,
     repetitions: int = 1,
+    selection_strategy: str = "manifest",
+    execution_budget: int | None = None,
+    selection_seed: int = 0,
 ) -> CampaignReport:
     if overwrite and resume:
         raise CampaignError("--overwrite and --resume are mutually exclusive")
@@ -499,6 +498,12 @@ def run_campaign(
     if repetitions <= 0 or repetitions > 1000:
         raise CampaignError("repetitions must be between 1 and 1000")
     manifest_digest, cases = load_manifest(manifest_path)
+    if selection_strategy not in ("manifest", "coverage-guided"):
+        raise CampaignError("selection strategy must be manifest or coverage-guided")
+    if execution_budget is None:
+        execution_budget = len(cases)
+    if execution_budget <= 0 or execution_budget > len(cases):
+        raise CampaignError("execution budget must be between 1 and the manifest case count")
     run_root = run_root.resolve()
     summary_path = run_root / "campaign-report.json"
     if summary_path.exists() and not (overwrite or resume):
@@ -508,7 +513,19 @@ def run_campaign(
     results: list[CampaignCaseResult] = []
     adapter = FastDDSAdapter()
     stopped = False
-    for case in cases:
+    scheduler = None
+    pending = list(cases)
+    selected_cases: list[ManifestCase] = []
+    if selection_strategy == "coverage-guided":
+        from .coverage import CoverageGuidedScheduler
+
+        scheduler = CoverageGuidedScheduler(cases, seed=selection_seed)
+
+    while pending and len(selected_cases) < execution_budget:
+        case = scheduler.choose(pending) if scheduler is not None else pending[0]
+        pending.remove(case)
+        selected_cases.append(case)
+        case_evidence = []
         for repetition in range(repetitions):
             started = time.monotonic()
             run_dir = _case_directory(run_root, case, repetition, repetitions)
@@ -649,6 +666,8 @@ def run_campaign(
                         duration_seconds=time.monotonic() - started,
                         configuration_binding=binding_mode,
                     )
+                if result.status == "completed":
+                    case_evidence.append(evidence)
             except (OSError, ValueError, RuntimeError) as error:
                 result = _error_result(
                     case,
@@ -664,10 +683,12 @@ def run_campaign(
             if stop_on_error and result.status == "error":
                 stopped = True
                 break
+        if scheduler is not None:
+            scheduler.observe(case, case_evidence)
         if stopped:
             break
 
-    trial_count = len(cases) * repetitions
+    trial_count = execution_budget * repetitions
     counts = {
         "completed": sum(result.status == "completed" for result in results),
         "error": sum(result.status == "error" for result in results),
@@ -679,12 +700,17 @@ def run_campaign(
     campaign = CampaignReport(
         schema_version=1,
         manifest_digest=manifest_digest,
-        case_count=len(cases),
+        case_count=execution_budget,
         repetitions=repetitions,
         trial_count=trial_count,
         counts=counts,
         cases=tuple(results),
-        scenario_summaries=_scenario_summaries(cases, results, repetitions),
+        scenario_summaries=_scenario_summaries(tuple(selected_cases), results, repetitions),
+        selection=(
+            scheduler.summary(len(cases), execution_budget)
+            if scheduler is not None
+            else None
+        ),
     )
     summary_path.write_text(
         json.dumps(campaign.to_dict(), indent=2, sort_keys=True) + "\n",

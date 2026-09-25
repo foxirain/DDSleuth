@@ -49,9 +49,13 @@ invariant evaluation, Cartesian and pairwise matrices, resumable repeated campai
 configuration and executable provenance, reliability summaries, stateful trajectory
 generation, partial-trace preservation, semantic candidate extraction, and
 schedule-sensitive candidate clustering. A vendor-neutral timed action-plan model
-now lets a long-lived role create, wait on, use, destroy, and recreate endpoints;
-the Fast DDS native probe executes those plans without baking a lifecycle sequence
-into the framework. The legacy
+now drives endpoint and participant lifecycles, real certificate-expiry revocation,
+and loopback transport faults. The Fast DDS probe can disconnect and recreate a
+secure participant in-process; the revision-pinned observer records the resulting
+remote revoke and participant master-key regeneration. A separate loopback-only
+shim can drop, delay, duplicate, or replay the exact UDP wire datagram. Exploration
+selects from a larger trajectory pool using runtime semantic-state and transition
+novelty rather than truncating a precomputed matrix. The legacy
 three-party Fast DDS harness remains a private golden regression case; no
 finding-specific trigger or unpatched exploit module is embedded in the public core.
 
@@ -156,6 +160,8 @@ ddsleuth explore \
   --output-root .runs/late-join-exploration \
   --materialize-identities \
   --budget 24 \
+  --pool-size 96 \
+  --strategy coverage-guided \
   --spacing-ms 0 \
   --spacing-ms 25 \
   --spacing-ms 250 \
@@ -167,7 +173,14 @@ ddsleuth explore \
 `relaxed` trajectories remove those baseline constraints and explore participant start
 orders and spacings. One zero-offset, barrier-preserving baseline is always retained,
 even when only relaxed mutations or nonzero spacings are requested; the remaining
-budget is selected deterministically from the configured seed. Every trial writes
+pool is selected deterministically from the configured seed. In the default
+`coverage-guided` strategy, the baseline executes first. Each completed trace is
+normalized into protocol states and actor/global transitions; GUIDs, timestamps, key
+fingerprints, and byte counts are excluded. Static schedule features that produced
+new runtime coverage receive energy when the next pending trajectory is chosen. The
+`--budget` limits executions while `--pool-size` controls the candidate pool (default
+four times the budget). `--action-jitter-ms` adds stable per-action early/late timing
+mutations without reordering a plan. Every trial writes
 `evidence.json`, `report.json`, and `candidates.json`. The top-level
 `exploration-report.json` clusters stable semantic fingerprints, reports occurrence
 rates, and marks candidates that exist only under a mutated schedule. A later barrier
@@ -183,14 +196,34 @@ runner-generated path into the process. For example:
   {"id": "match-1", "at_ms": 0, "operation": "endpoint.wait_match"},
   {"id": "write-1", "at_ms": 0, "operation": "sample.write"},
   {"id": "destroy-1", "at_ms": 25, "operation": "endpoint.destroy"},
-  {"id": "create-2", "at_ms": 50, "operation": "endpoint.create"}
+  {"id": "disconnect", "at_ms": 50, "operation": "participant.disconnect"},
+  {"id": "reconnect", "at_ms": 100, "operation": "participant.reconnect"},
+  {"id": "create-2", "at_ms": 100, "operation": "endpoint.create"}
 ]
 ```
 
 Action timestamps and arguments are ordinary scenario fields, so matrix dimensions
 such as `execution.roles.1.actions.3.at_ms=[5,25,45]` can explore lifecycle timing
 without adding a new probe mode for every sequence. Actions with equal timestamps keep
-their declared order. See `native_scripted_lifecycle.json` for a complete live case.
+their declared order. `credential.wait_revoked` blocks on the implementation's real
+authentication callback; a participant identity with `expires_after_seconds` is signed
+with an exact second-granularity `notAfter` for this experiment. This is not a synthetic
+"revoke" marker. See `native_participant_reconnect.json` and
+`native_credential_revocation_rekey.json` for complete live cases.
+
+Wire replay and transport faults are implemented outside the DDS API:
+
+```sh
+cmake -S probes/transport_fault -B build/transport-fault
+cmake --build build/transport-fault
+export DDSLEUTH_TRANSPORT_FAULT_LIBRARY="$PWD/build/transport-fault/libddsleuth_transport_fault.so"
+```
+
+Roles may then use `transport.drop_next`, `transport.delay_next`,
+`transport.duplicate_next`, and `transport.replay_last`. The shim interposes the UDP
+send boundary, refuses to mutate non-loopback destinations, emits normalized events,
+and has its SHA-256 recorded in evidence. `transport.replay_last` resends captured
+bytes; it is not an application-level second write. See `native_transport_replay.json`.
 
 To run a local Fast DDS golden harness, provide the executable, certificate directory, and signed policy directory through environment variables:
 
@@ -226,7 +259,8 @@ Public Fast DDS scenarios now include benign delivery, exact key distribution, a
 denied participant, two authorized recipients, writer endpoint recreation, a denied
 participant that joins after protected traffic has already flowed, forced session-key
 rotation under continuous protected delivery, and an action-plan-driven writer
-lifecycle. The
+lifecycle, participant reconnect, certificate-expiry revocation with participant
+rekey, and exact UDP replay. The
 recreation scenario deletes and recreates a real writer inside one participant,
 requires two application deliveries, and checks that user-endpoint key fingerprints
 are disjoint across the destruction boundary. The late-join scenario keeps the real

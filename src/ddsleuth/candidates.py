@@ -153,9 +153,26 @@ def discover_candidates(
     overgrants: dict[str, list[tuple[int, str, str]]] = {}
     unauthorized_user_keys: dict[tuple[str, str, str | None], list[int]] = {}
     unauthorized_deliveries: dict[tuple[str, str], list[int]] = {}
+    local_revocations: dict[str, int] = {}
+    writes_after_revocation: dict[str, list[tuple[int, str | None]]] = defaultdict(list)
+    received_messages: dict[str, list[tuple[int, str]]] = defaultdict(list)
 
     for index, event in enumerate(evidence.events):
         sequence = index if event.sequence is None else event.sequence
+        if (
+            event.kind == EventKind.CREDENTIAL_REVOKED
+            and event.outcome == "revoked"
+            and event.attributes.get("local_identity") is True
+        ):
+            local_revocations.setdefault(event.actor, sequence)
+
+        if event.kind == EventKind.APPLICATION_SAMPLE_WRITTEN and event.actor in local_revocations:
+            if sequence > local_revocations[event.actor]:
+                message = event.attributes.get("message")
+                writes_after_revocation[event.actor].append(
+                    (sequence, message if isinstance(message, str) else None)
+                )
+
         if event.kind == EventKind.ACCESS_CONTROL_DECISION and event.outcome == "allowed":
             operation = event.attributes.get("operation")
             resource = event.attributes.get("resource")
@@ -204,11 +221,53 @@ def discover_candidates(
                     ).append(sequence)
 
         if event.kind == EventKind.APPLICATION_SAMPLE_RECEIVED and event.outcome == "received":
+            message = event.attributes.get("message")
+            if isinstance(message, str):
+                received_messages[message].append((sequence, event.actor))
             resource = event_resource(scenario, event, operation="subscribe")
             if resource is not None and not is_permitted(
                 scenario, event.actor, "subscribe", resource
             ):
                 unauthorized_deliveries.setdefault((event.actor, resource), []).append(sequence)
+
+    for actor, writes in writes_after_revocation.items():
+        deliveries = [
+            (receive_sequence, receiver, write_sequence, message)
+            for write_sequence, message in writes
+            if message is not None
+            for receive_sequence, receiver in received_messages.get(message, ())
+            if receive_sequence > write_sequence
+        ]
+        if not deliveries:
+            continue
+        evidence_events = [local_revocations[actor]]
+        evidence_events.extend(write_sequence for _, _, write_sequence, _ in deliveries)
+        evidence_events.extend(receive_sequence for receive_sequence, _, _, _ in deliveries)
+        receivers = {receiver for _, receiver, _, _ in deliveries}
+        candidates.append(
+            _candidate(
+                family="credential_revocation_bypass",
+                title=f"Data from revoked participant {actor} was delivered after revocation",
+                risk_tier="critical_lead",
+                score=99,
+                confidence=0.99,
+                actors=(actor, *receivers),
+                resources=tuple(scenario.topics),
+                evidence_events=evidence_events,
+                signals=(
+                    "local_identity_revoked",
+                    "post_revocation_write_succeeded",
+                    "post_revocation_application_delivery",
+                ),
+                execution_complete=execution_complete,
+                discriminator={"revoked_actor": actor},
+                details={
+                    "revocation_event": local_revocations[actor],
+                    "post_revocation_deliveries": len(deliveries),
+                    "receivers": sorted(receivers),
+                },
+            )
+        )
 
     covered_overgrants: set[str] = set()
     for (actor, resource), deliveries in unauthorized_deliveries.items():
@@ -438,7 +497,11 @@ def _runtime_profile(
                 str(event.attributes.get("lifecycle_epoch", "unknown")),
                 event.outcome,
             )
-        elif event.kind in (EventKind.KEY_ROTATED, EventKind.AUTHORITY_REVOKED):
+        elif event.kind in (
+            EventKind.KEY_ROTATED,
+            EventKind.AUTHORITY_REVOKED,
+            EventKind.CREDENTIAL_REVOKED,
+        ):
             category = "authority_lifecycle"
             fact = (
                 category,
@@ -446,6 +509,32 @@ def _runtime_profile(
                 event.kind,
                 str(event.attributes.get("rotation_kind", "unknown")),
                 str(event.attributes.get("context", "unknown")),
+                event.outcome,
+            )
+        elif event.kind in (
+            EventKind.PARTICIPANT_DISCONNECTED,
+            EventKind.PARTICIPANT_RECONNECTED,
+        ):
+            category = "participant_lifecycle"
+            fact = (
+                category,
+                event.actor,
+                event.kind,
+                str(event.attributes.get("participant_epoch", "unknown")),
+                event.outcome,
+            )
+        elif event.kind in (
+            EventKind.TRANSPORT_DATAGRAM_DROPPED,
+            EventKind.TRANSPORT_DATAGRAM_DELAYED,
+            EventKind.TRANSPORT_DATAGRAM_DUPLICATED,
+            EventKind.TRANSPORT_DATAGRAM_REPLAYED,
+        ):
+            category = "transport_fault"
+            fact = (
+                category,
+                event.actor,
+                event.kind,
+                str(event.attributes.get("fault", "unknown")),
                 event.outcome,
             )
         if fact is not None and category is not None:
@@ -543,6 +632,18 @@ def discover_schedule_differences(
                 "schedule_authority_lifecycle_divergence",
                 "Authority lifecycle behavior changed under a schedule-only mutation",
                 78,
+                "investigate",
+            ),
+            "participant_lifecycle": (
+                "schedule_participant_lifecycle_divergence",
+                "Participant reconnect behavior changed under a schedule-only mutation",
+                76,
+                "investigate",
+            ),
+            "transport_fault": (
+                "schedule_transport_fault_divergence",
+                "Transport fault handling changed under a schedule-only mutation",
+                72,
                 "investigate",
             ),
         }[category]

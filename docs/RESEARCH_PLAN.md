@@ -43,7 +43,10 @@ lifecycle, and application-delivery invariants across distributed state transiti
 - [x] Endpoint recreation with pre/post key-freshness and delivery checks.
 - [x] Denied late join after an established protected association.
 - [x] Protocol-driven session rekey with triggering-sample delivery correlation.
-- Authorized late join, reconnect, credential expiration, and revocation.
+- [x] Secure participant reconnect with pre/post application delivery.
+- [x] Exact X.509 expiry, remote credential revocation, and participant master-key rekey.
+- [x] Exact loopback UDP replay plus drop/delay/duplication fault actions.
+- Authorized late join and broader credential replacement/CRL experiments.
 - Unicast and multicast recipient sets.
 
 ### M3.5 — Stateful discovery engine
@@ -56,9 +59,10 @@ lifecycle, and application-delivery invariants across distributed state transiti
 - [x] Split common sender and recipient-specific Fast DDS key semantics.
 - [x] Vendor-neutral timed role actions with a Fast DDS executor for endpoint create,
   match, write/wait, destroy, and recreation inside one long-lived participant.
-- Extend the action protocol to participant reconnect, credential revocation, explicit
-  rekey, replay, and controlled transport faults.
-- Coverage feedback over semantic state transitions rather than source lines alone.
+- [x] Extend the action protocol to participant reconnect, real credential revocation,
+  explicit revocation-driven rekey evidence, replay, and controlled transport faults.
+- [x] Runtime coverage feedback over semantic states and transitions rather than source
+  lines, with bounded pool selection and an auditable selection trace.
 
 ### M4 — Second implementation
 

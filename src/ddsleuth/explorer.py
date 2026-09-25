@@ -89,6 +89,7 @@ def analyze_exploration(
         if (
             assignments.get("trajectory.barrier_mode") == "preserve"
             and assignments.get("trajectory.spacing_ms") == 0
+            and assignments.get("trajectory.action_jitter_ms", 0) == 0
         ):
             baselines[(semantic_key(assignments), result.repetition)] = context
 
@@ -142,6 +143,7 @@ def analyze_exploration(
             isinstance(item.get("assignments"), Mapping)
             and item["assignments"].get("trajectory.barrier_mode") == "preserve"
             and item["assignments"].get("trajectory.spacing_ms") == 0
+            and item["assignments"].get("trajectory.action_jitter_ms", 0) == 0
             for item in items
         )
         only_under_mutation = baseline_occurrences == 0
@@ -193,6 +195,10 @@ def analyze_exploration(
         "base_scenario": manifest_raw.get("base_scenario"),
         "seed": manifest_raw.get("seed"),
         "budget": manifest_raw.get("budget"),
+        "execution_budget": manifest_raw.get("execution_budget"),
+        "coverage_guidance": (
+            dict(campaign.selection) if campaign.selection is not None else None
+        ),
         "generated_trajectories": len(manifest_cases),
         "expected_trials": campaign.trial_count,
         "analyzed_trials": analyzed_trials,

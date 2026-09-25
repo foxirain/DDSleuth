@@ -187,6 +187,57 @@ inline void observe_session_rotation(
     }
 }
 
+template<typename Guid>
+void observe_identity_revocation(
+        const Guid& guid,
+        bool local_identity)
+{
+    if (!enabled())
+    {
+        return;
+    }
+    try
+    {
+        sink().emit(
+            "credential.revoked",
+            actor(),
+            "revoked",
+            JsonObject()
+                    .string("participant_guid", guid_string(guid))
+                    .boolean("local_identity", local_identity)
+                    .string("reason", "certificate_expired"));
+    }
+    catch (const std::exception& error)
+    {
+        emit_error("identity_revocation", error.what());
+    }
+}
+
+template<typename Guid>
+void observe_participant_rekey(
+        const Guid& revoked_guid)
+{
+    if (!enabled())
+    {
+        return;
+    }
+    try
+    {
+        sink().emit(
+            "key.rotated",
+            actor(),
+            "rotated",
+            JsonObject()
+                    .string("rotation_kind", "participant_master_key")
+                    .string("reason", "remote_identity_revoked")
+                    .string("revoked_participant_guid", guid_string(revoked_guid)));
+    }
+    catch (const std::exception& error)
+    {
+        emit_error("participant_rekey", error.what());
+    }
+}
+
 template<typename Guid, typename TokenSequence>
 void observe_endpoint_tokens(
         const std::string& phase,

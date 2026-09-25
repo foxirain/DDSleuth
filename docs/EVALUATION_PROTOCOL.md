@@ -12,6 +12,7 @@ One trial is the tuple of:
 - implementation name, version, and executable digest;
 - generated identity and policy artifact digests;
 - matrix assignments;
+- trajectory selection rank and cumulative runtime coverage when guidance is enabled;
 - repetition index;
 - normalized evidence bundle and oracle report.
 
@@ -65,7 +66,9 @@ object insertion order or ambient defaults:
 - CryptoToken class and exact participant/endpoint route;
 - metadata, data, RTPS, discovery, and liveliness protection kinds;
 - session-key block threshold and sample count;
-- transport and delivery mode once their adapters are available.
+- participant disconnect/reconnect and exact credential-expiry time;
+- UDP drop, delay, duplication, and exact replay action;
+- transport and delivery mode.
 
 All checked-in scenarios use loopback. Matrix cases that mutate security policy must
 materialize and sign policy artifacts per case.
@@ -80,6 +83,8 @@ Results should identify their observation mode:
    events from an observation-only source overlay.
 4. Capability: controlled decryption, protected-byte construction, implementation
    acceptance, and application delivery.
+5. Transport fault: an opt-in loopback syscall boundary that records the exact fault
+   applied without storing packet contents.
 
 White-box runs must include `observer_health`. Raw keys and stable cross-run key
 identifiers are prohibited; equality is tested with an ephemeral per-run HMAC secret.
@@ -113,6 +118,8 @@ packet-fuzzing baseline under equal wall-clock and compute budgets. Report at le
 - candidate precision after manual validation;
 - fraction of candidates that appear only under schedule mutation;
 - validated High/Critical yield per execution-hour.
+- runtime semantic states/transitions covered per execution;
+- guided-versus-seeded-random coverage and candidate yield under the same budget.
 
 The primary claim is cross-layer detection, not raw crash count. A crash is counted as
 a security result only after its trust boundary and attacker-controlled input are

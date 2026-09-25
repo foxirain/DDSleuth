@@ -44,7 +44,12 @@ rotation campaigns when paired with `DDSLEUTH_EXPECTED_SAMPLES` on the reader.
 Scripted modes consume the runner-generated `DDSLEUTH_ACTION_PLAN`. Writer plans
 support `endpoint.create`, `endpoint.wait_match`, `sample.write`, and
 `endpoint.destroy`; reader plans support `endpoint.create`, `sample.wait`, and
-`endpoint.destroy`. An optional first argument overrides the match/sample target or
+`endpoint.destroy`. Both modes support `participant.disconnect`,
+`participant.reconnect`, and `credential.wait_revoked`. Disconnect requires the role
+to destroy its endpoint first. Reconnect recreates the secure participant, type, topic,
+publisher/subscriber, and later endpoint rather than merely emitting a lifecycle event.
+`credential.wait_revoked` waits for a real unauthorized authentication callback.
+An optional first argument overrides the match/sample/revocation target or
 the written message as appropriate. The plan path is runner-reserved, its fields are
 validated before launch, and every action is bracketed by `action.started` and
 `action.completed` events. This makes endpoint lifecycle order and timing scenario
@@ -58,3 +63,5 @@ does not include private-key paths in evidence.
 The probe deliberately contains no CryptoToken interception, raw packet injection,
 key recovery, or vendor-private object access. Embargoed white-box capability modules
 remain outside the public tree until coordinated disclosure permits release.
+Transport actions are delegated to the separate loopback-only shim; the native probe
+does not emulate wire replay with a second DDS write.

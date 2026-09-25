@@ -48,7 +48,13 @@
             "type": "object",
             "required": ["subject"],
             "properties": {
-              "subject": { "type": "string", "minLength": 1 }
+              "subject": { "type": "string", "minLength": 1 },
+              "expires_after_seconds": {
+                "type": "integer",
+                "minimum": 2,
+                "maximum": 86400,
+                "description": "Generate a short-lived test certificate for runtime revocation experiments."
+              }
             },
             "additionalProperties": false
           }

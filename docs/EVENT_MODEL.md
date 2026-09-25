@@ -62,6 +62,15 @@ must not be used for cross-process lifecycle ordering claims.
 | `endpoint.created` | A local endpoint was created for a lifecycle epoch |
 | `endpoint.destroyed` | Endpoint deletion completed and defines a key-lifecycle boundary |
 | `endpoint.recreated` | A replacement endpoint was created for the next lifecycle epoch |
+| `participant.disconnected` | A real participant and all contained entities were deleted |
+| `participant.reconnected` | A replacement secure participant completed creation |
+| `credential.authenticated` | The implementation authenticated a participant identity |
+| `credential.revoked` | The implementation invalidated a local or remote identity |
+| `transport.fault_armed` | A loopback UDP fault became active |
+| `transport.datagram_dropped` | The shim suppressed an outbound loopback datagram |
+| `transport.datagram_delayed` | The shim delayed an outbound loopback datagram |
+| `transport.datagram_duplicated` | The shim duplicated an outbound loopback datagram |
+| `transport.datagram_replayed` | The shim resent an exact captured wire datagram |
 | `application.write_attempt` | A sample was fully populated and is about to enter the DDS write call |
 | `application.sample_written` | The DDS write call returned success |
 | `application.sample_received` | A real application endpoint returned the sample |
@@ -129,3 +138,15 @@ runner-generated plan. They contain the action id, adapter-owned operation name,
 declared relative timestamp. These events are execution context rather than security
 conclusions; endpoint, authorization, key, and application events produced between
 them remain the evidence consumed by security invariants.
+
+`credential.revoked` distinguishes `local_identity=true` from a remote invalidation.
+Fast DDS may emit the same semantic transition at both the white-box boundary and the
+public participant listener; candidate logic treats the event as a boundary, not a
+counter. `key.rotated` with `rotation_kind=participant_master_key` is emitted only
+after the crypto plugin successfully regenerates the remaining participant's key in
+response to remote revocation.
+
+Transport events are evidence from the syscall-boundary shim. They include the fault,
+action id, packet length, and loopback flag, never raw packet contents. A replay event
+therefore proves that the original wire image was resubmitted without embedding the
+security-sensitive bytes in the report.

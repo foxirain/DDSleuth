@@ -12,6 +12,7 @@
 #include <limits>
 #include <memory>
 #include <mutex>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <thread>
@@ -23,6 +24,7 @@
 #include <fastdds/dds/core/status/SubscriptionMatchedStatus.hpp>
 #include <fastdds/dds/domain/DomainParticipant.hpp>
 #include <fastdds/dds/domain/DomainParticipantFactory.hpp>
+#include <fastdds/dds/domain/DomainParticipantListener.hpp>
 #include <fastdds/dds/domain/qos/DomainParticipantQos.hpp>
 #include <fastdds/dds/publisher/DataWriter.hpp>
 #include <fastdds/dds/publisher/DataWriterListener.hpp>
@@ -44,6 +46,7 @@
 #include <fastdds/dds/xtypes/dynamic_types/MemberDescriptor.hpp>
 #include <fastdds/dds/xtypes/dynamic_types/TypeDescriptor.hpp>
 #include <fastdds/dds/xtypes/type_representation/TypeObject.hpp>
+#include <fastdds/rtps/participant/ParticipantDiscoveryInfo.hpp>
 
 using namespace eprosima::fastdds::dds;
 
@@ -364,11 +367,30 @@ public:
 
     ~ParticipantOwner()
     {
-        if (participant_ != nullptr)
+        close();
+    }
+
+    DomainParticipant* get() const
+    {
+        return participant_;
+    }
+
+    void reset(
+            DomainParticipant* participant)
+    {
+        close();
+        participant_ = participant;
+    }
+
+    void close()
+    {
+        if (participant_ == nullptr)
         {
-            participant_->delete_contained_entities();
-            DomainParticipantFactory::get_instance()->delete_participant(participant_);
+            return;
         }
+        participant_->delete_contained_entities();
+        DomainParticipantFactory::get_instance()->delete_participant(participant_);
+        participant_ = nullptr;
     }
 
 private:
@@ -393,11 +415,28 @@ public:
 
     ~PublisherOwner()
     {
-        if (publisher_ != nullptr)
+        close();
+    }
+
+    void reset(
+            DomainParticipant* participant,
+            Publisher* publisher)
+    {
+        close();
+        participant_ = participant;
+        publisher_ = publisher;
+    }
+
+    void close()
+    {
+        if (publisher_ == nullptr)
         {
-            publisher_->delete_contained_entities();
-            participant_->delete_publisher(publisher_);
+            return;
         }
+        publisher_->delete_contained_entities();
+        participant_->delete_publisher(publisher_);
+        publisher_ = nullptr;
+        participant_ = nullptr;
     }
 
 private:
@@ -458,17 +497,99 @@ public:
 
     ~SubscriberOwner()
     {
-        if (subscriber_ != nullptr)
+        close();
+    }
+
+    void reset(
+            DomainParticipant* participant,
+            Subscriber* subscriber)
+    {
+        close();
+        participant_ = participant;
+        subscriber_ = subscriber;
+    }
+
+    void close()
+    {
+        if (subscriber_ == nullptr)
         {
-            subscriber_->delete_contained_entities();
-            participant_->delete_subscriber(subscriber_);
+            return;
         }
+        subscriber_->delete_contained_entities();
+        participant_->delete_subscriber(subscriber_);
+        subscriber_ = nullptr;
+        participant_ = nullptr;
     }
 
 private:
 
     DomainParticipant* participant_;
     Subscriber* subscriber_;
+};
+
+class ParticipantSecurityListener final : public DomainParticipantListener
+{
+public:
+
+    ParticipantSecurityListener(
+            ddsleuth::EventSink& sink,
+            std::string actor)
+        : sink_(sink)
+        , actor_(std::move(actor))
+    {
+    }
+
+#if HAVE_SECURITY
+    void onParticipantAuthentication(
+            DomainParticipant* participant,
+            eprosima::fastdds::rtps::ParticipantAuthenticationInfo&& info) override
+    {
+        std::ostringstream guid;
+        guid << info.guid;
+        const bool authorized =
+                info.status == eprosima::fastdds::rtps::ParticipantAuthenticationInfo::AUTHORIZED_PARTICIPANT;
+        bool local_identity = false;
+        if (participant != nullptr)
+        {
+            local_identity = participant->guid() == info.guid;
+        }
+        sink_.emit(
+            authorized ? "credential.authenticated" : "credential.revoked",
+            actor_,
+            authorized ? "authorized" : "revoked",
+            ddsleuth::JsonObject()
+                    .string("participant_guid", guid.str())
+                    .boolean("local_identity", local_identity)
+                    .string("reason", authorized ? "authentication_completed" : "identity_invalidated"));
+        if (!authorized)
+        {
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                ++revocations_;
+            }
+            condition_.notify_all();
+        }
+    }
+#endif // if HAVE_SECURITY
+
+    bool wait_for_revocations(
+            std::chrono::milliseconds timeout,
+            uint32_t expected)
+    {
+        std::unique_lock<std::mutex> lock(mutex_);
+        return condition_.wait_for(lock, timeout, [this, expected]()
+                {
+                    return revocations_ >= expected;
+                });
+    }
+
+private:
+
+    ddsleuth::EventSink& sink_;
+    std::string actor_;
+    std::mutex mutex_;
+    std::condition_variable condition_;
+    uint32_t revocations_{0};
 };
 
 class WriterListener final : public DataWriterListener
@@ -695,14 +816,56 @@ uint32_t action_count(
            positive_text(action.arguments[0], "action " + action.id + " count");
 }
 
+DomainParticipant* create_secure_participant(
+        const Arguments& arguments,
+        ParticipantSecurityListener& listener,
+        TypeSupport& type,
+        Topic*& topic)
+{
+    DomainParticipant* participant = DomainParticipantFactory::get_instance()->create_participant(
+        arguments.domain,
+        security_qos(arguments),
+        &listener,
+        StatusMask::none());
+    if (participant == nullptr)
+    {
+        throw std::runtime_error("cannot create secure DomainParticipant");
+    }
+    if (type.register_type(participant) != RETCODE_OK)
+    {
+        DomainParticipantFactory::get_instance()->delete_participant(participant);
+        throw std::runtime_error("cannot register dynamic type");
+    }
+    topic = participant->create_topic(
+        arguments.topic,
+        type.get_type_name(),
+        TOPIC_QOS_DEFAULT);
+    if (topic == nullptr)
+    {
+        participant->delete_contained_entities();
+        DomainParticipantFactory::get_instance()->delete_participant(participant);
+        throw std::runtime_error("cannot create topic");
+    }
+    return participant;
+}
+
+bool delegated_transport_action(
+        const PlannedAction& action)
+{
+    return action.operation.rfind("transport.", 0) == 0;
+}
+
 int run_scripted_writer(
         const Arguments& arguments,
-        DomainParticipant* participant,
-        Topic* topic,
+        ParticipantOwner& participant_owner,
+        ParticipantSecurityListener& participant_listener,
+        TypeSupport& type,
+        Topic*& topic,
         DynamicType::_ref_type dynamic_type,
         ddsleuth::EventSink& sink)
 {
     const std::vector<PlannedAction> actions = load_action_plan();
+    DomainParticipant* participant = participant_owner.get();
     Publisher* publisher = participant->create_publisher(PUBLISHER_QOS_DEFAULT);
     if (publisher == nullptr)
     {
@@ -722,6 +885,7 @@ int run_scripted_writer(
 
     DataWriter* writer = nullptr;
     uint32_t lifecycle_epoch = 0;
+    uint32_t participant_epoch = 1;
     uint32_t sample_index = 0;
     const auto started = std::chrono::steady_clock::now();
     for (const PlannedAction& action : actions)
@@ -813,6 +977,61 @@ int run_scripted_writer(
                             .string("topic", arguments.topic)
                             .integer("lifecycle_epoch", lifecycle_epoch));
         }
+        else if (action.operation == "participant.disconnect")
+        {
+            if (writer != nullptr)
+            {
+                throw std::runtime_error(
+                          "destroy the writer before disconnecting its participant");
+            }
+            publisher_owner.close();
+            publisher = nullptr;
+            topic = nullptr;
+            participant_owner.close();
+            participant = nullptr;
+            sink.emit("participant.disconnected", arguments.actor, "disconnected",
+                    ddsleuth::JsonObject().integer("participant_epoch", participant_epoch));
+        }
+        else if (action.operation == "participant.reconnect")
+        {
+            if (participant != nullptr)
+            {
+                throw std::runtime_error("cannot reconnect while a participant is active");
+            }
+            participant = create_secure_participant(
+                arguments, participant_listener, type, topic);
+            participant_owner.reset(participant);
+            publisher = participant->create_publisher(PUBLISHER_QOS_DEFAULT);
+            if (publisher == nullptr)
+            {
+                throw std::runtime_error("cannot recreate publisher");
+            }
+            publisher_owner.reset(participant, publisher);
+            publisher->get_default_datawriter_qos(writer_qos);
+            writer_qos.reliability().kind = RELIABLE_RELIABILITY_QOS;
+            if (arguments.max_blocks_per_session > 0)
+            {
+                writer_qos.properties().properties().emplace_back(
+                    "dds.sec.crypto.maxblockspersession",
+                    std::to_string(arguments.max_blocks_per_session));
+            }
+            ++participant_epoch;
+            sink.emit("participant.reconnected", arguments.actor, "reconnected",
+                    ddsleuth::JsonObject().integer("participant_epoch", participant_epoch));
+        }
+        else if (action.operation == "credential.wait_revoked")
+        {
+            const uint32_t target = action_count(action, 1);
+            if (!participant_listener.wait_for_revocations(arguments.timeout, target))
+            {
+                throw std::runtime_error("credential revocation was not observed before timeout");
+            }
+        }
+        else if (delegated_transport_action(action))
+        {
+            // A loopback fault shim consumes the same authenticated plan. The
+            // probe deliberately performs no packet emulation itself.
+        }
         else
         {
             throw std::runtime_error("unsupported scripted writer action: " + action.operation);
@@ -824,12 +1043,15 @@ int run_scripted_writer(
 
 int run_scripted_reader(
         const Arguments& arguments,
-        DomainParticipant* participant,
-        Topic* topic,
+        ParticipantOwner& participant_owner,
+        ParticipantSecurityListener& participant_listener,
+        TypeSupport& type,
+        Topic*& topic,
         DynamicType::_ref_type dynamic_type,
         ddsleuth::EventSink& sink)
 {
     const std::vector<PlannedAction> actions = load_action_plan();
+    DomainParticipant* participant = participant_owner.get();
     Subscriber* subscriber = participant->create_subscriber(SUBSCRIBER_QOS_DEFAULT);
     if (subscriber == nullptr)
     {
@@ -843,6 +1065,7 @@ int run_scripted_reader(
 
     DataReader* reader = nullptr;
     uint32_t lifecycle_epoch = 0;
+    uint32_t participant_epoch = 1;
     const auto started = std::chrono::steady_clock::now();
     for (const PlannedAction& action : actions)
     {
@@ -906,6 +1129,54 @@ int run_scripted_reader(
                             .string("endpoint", "reader")
                             .string("topic", arguments.topic)
                             .integer("lifecycle_epoch", lifecycle_epoch));
+        }
+        else if (action.operation == "participant.disconnect")
+        {
+            if (reader != nullptr)
+            {
+                throw std::runtime_error(
+                          "destroy the reader before disconnecting its participant");
+            }
+            subscriber_owner.close();
+            subscriber = nullptr;
+            topic = nullptr;
+            participant_owner.close();
+            participant = nullptr;
+            sink.emit("participant.disconnected", arguments.actor, "disconnected",
+                    ddsleuth::JsonObject().integer("participant_epoch", participant_epoch));
+        }
+        else if (action.operation == "participant.reconnect")
+        {
+            if (participant != nullptr)
+            {
+                throw std::runtime_error("cannot reconnect while a participant is active");
+            }
+            participant = create_secure_participant(
+                arguments, participant_listener, type, topic);
+            participant_owner.reset(participant);
+            subscriber = participant->create_subscriber(SUBSCRIBER_QOS_DEFAULT);
+            if (subscriber == nullptr)
+            {
+                throw std::runtime_error("cannot recreate subscriber");
+            }
+            subscriber_owner.reset(participant, subscriber);
+            subscriber->get_default_datareader_qos(reader_qos);
+            reader_qos.reliability().kind = RELIABLE_RELIABILITY_QOS;
+            ++participant_epoch;
+            sink.emit("participant.reconnected", arguments.actor, "reconnected",
+                    ddsleuth::JsonObject().integer("participant_epoch", participant_epoch));
+        }
+        else if (action.operation == "credential.wait_revoked")
+        {
+            const uint32_t target = action_count(action, 1);
+            if (!participant_listener.wait_for_revocations(arguments.timeout, target))
+            {
+                throw std::runtime_error("credential revocation was not observed before timeout");
+            }
+        }
+        else if (delegated_transport_action(action))
+        {
+            // Handled by the loopback transport fault shim.
         }
         else
         {
@@ -1109,42 +1380,31 @@ int run(
         const Arguments& arguments)
 {
     ddsleuth::EventSink sink("fastdds", stdout);
-    DomainParticipant* participant = DomainParticipantFactory::get_instance()->create_participant(
-        arguments.domain,
-        security_qos(arguments));
-    if (participant == nullptr)
-    {
-        throw std::runtime_error("cannot create secure DomainParticipant");
-    }
-    ParticipantOwner owner(participant);
+    ParticipantSecurityListener participant_listener(sink, arguments.actor);
     DynamicType::_ref_type dynamic_type = create_type();
     if (!dynamic_type)
     {
         throw std::runtime_error("cannot build dynamic type");
     }
     TypeSupport type(new DynamicPubSubType(dynamic_type));
-    if (type.register_type(participant) != RETCODE_OK)
-    {
-        throw std::runtime_error("cannot register dynamic type");
-    }
-    Topic* topic = participant->create_topic(
-        arguments.topic,
-        type.get_type_name(),
-        TOPIC_QOS_DEFAULT);
-    if (topic == nullptr)
-    {
-        throw std::runtime_error("cannot create topic");
-    }
+    Topic* topic = nullptr;
+    DomainParticipant* participant = create_secure_participant(
+        arguments, participant_listener, type, topic);
+    ParticipantOwner owner(participant);
     sink.emit("probe.ready", arguments.actor, "ready",
-            ddsleuth::JsonObject().string("endpoint", "participant"));
+            ddsleuth::JsonObject()
+                    .string("endpoint", "participant")
+                    .integer("participant_epoch", 1));
 
     if (arguments.mode == "scripted-writer")
     {
-        return run_scripted_writer(arguments, participant, topic, dynamic_type, sink);
+        return run_scripted_writer(
+            arguments, owner, participant_listener, type, topic, dynamic_type, sink);
     }
     if (arguments.mode == "scripted-reader")
     {
-        return run_scripted_reader(arguments, participant, topic, dynamic_type, sink);
+        return run_scripted_reader(
+            arguments, owner, participant_listener, type, topic, dynamic_type, sink);
     }
     if (arguments.mode == "writer" || arguments.mode == "recreate-writer" ||
             arguments.mode == "check-writer" ||

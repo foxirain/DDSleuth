@@ -22,6 +22,11 @@ Public regression cases should contain only information that is already public, 
 
 Checked-in scenarios must use loopback or a disposable isolated network. External or production targets require explicit authorization and are not enabled by the default runner.
 
+Transport-fault actions are more restrictive: the runner accepts them only in a
+`loopback` scenario, and the preload shim mutates only IPv4 `127.0.0.0/8` or IPv6
+`::1` datagrams. Other destinations pass through unchanged. The shim path comes from
+the operator, never the scenario, and its digest is recorded in evidence.
+
 The current process runner isolates protocol roles logically, not as mutually hostile
 operating-system users. Generated private keys are mode `0600` and only the matching
 key path is injected into each role, but all roles normally execute under the same OS

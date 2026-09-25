@@ -5,6 +5,7 @@ import json
 import os
 import re
 import subprocess
+from datetime import datetime, timedelta, timezone
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Mapping
@@ -173,6 +174,40 @@ def materialize_identities(
     )
 
     identities: dict[str, ParticipantIdentity] = {}
+    expiring = any(
+        participant.identity is not None
+        and participant.identity.expires_after_seconds is not None
+        for participant in scenario.participants.values()
+    )
+    ca_config = output_dir / "openssl-ca.cnf"
+    if expiring:
+        (output_dir / "newcerts").mkdir(exist_ok=True)
+        (output_dir / "index.txt").write_text("", encoding="utf-8")
+        (output_dir / "serial").write_text("1000\n", encoding="utf-8")
+        ca_config.write_text(
+            "[ca]\n"
+            "default_ca=dds_ca\n"
+            "[dds_ca]\n"
+            f"database={output_dir / 'index.txt'}\n"
+            f"new_certs_dir={output_dir / 'newcerts'}\n"
+            f"certificate={ca_certificate}\n"
+            f"private_key={ca_key}\n"
+            f"serial={output_dir / 'serial'}\n"
+            "default_md=sha256\n"
+            "default_days=7\n"
+            "policy=dds_policy\n"
+            "unique_subject=no\n"
+            "copy_extensions=copy\n"
+            "[dds_policy]\n"
+            "countryName=optional\n"
+            "stateOrProvinceName=optional\n"
+            "localityName=optional\n"
+            "organizationName=optional\n"
+            "organizationalUnitName=optional\n"
+            "commonName=supplied\n"
+            "emailAddress=optional\n",
+            encoding="utf-8",
+        )
     filenames: set[str] = set()
     for index, (actor, participant) in enumerate(scenario.participants.items(), start=2):
         filename = _safe_actor_name(actor)
@@ -188,6 +223,7 @@ def materialize_identities(
         certificate = output_dir / f"{filename}.cert.pem"
         extensions = output_dir / f"{filename}.ext"
         extensions.write_text(
+            "[usr_cert]\n"
             "basicConstraints=critical,CA:FALSE\n"
             "keyUsage=critical,digitalSignature,keyAgreement\n",
             encoding="utf-8",
@@ -207,29 +243,26 @@ def materialize_identities(
             ],
             f"cannot generate identity request for {actor}",
         )
-        _run(
-            [
-                "openssl",
-                "x509",
-                "-req",
-                "-in",
-                str(csr),
-                "-CA",
-                str(ca_certificate),
-                "-CAkey",
-                str(ca_key),
-                "-set_serial",
-                str(index),
-                "-days",
-                str(validity_days),
-                "-sha256",
-                "-extfile",
-                str(extensions),
-                "-out",
-                str(certificate),
-            ],
-            f"cannot sign identity certificate for {actor}",
-        )
+        expires_after = participant.identity.expires_after_seconds
+        if expires_after is None:
+            signing_command = [
+                "openssl", "x509", "-req", "-in", str(csr),
+                "-CA", str(ca_certificate), "-CAkey", str(ca_key),
+                "-set_serial", str(index), "-days", str(validity_days),
+                "-sha256", "-extfile", str(extensions), "-extensions", "usr_cert",
+                "-out", str(certificate),
+            ]
+        else:
+            now = datetime.now(timezone.utc)
+            start = (now - timedelta(seconds=30)).strftime("%Y%m%d%H%M%SZ")
+            end = (now + timedelta(seconds=expires_after)).strftime("%Y%m%d%H%M%SZ")
+            signing_command = [
+                "openssl", "ca", "-batch", "-notext", "-config", str(ca_config),
+                "-in", str(csr), "-startdate", start, "-enddate", end,
+                "-extfile", str(extensions), "-extensions", "usr_cert",
+                "-out", str(certificate),
+            ]
+        _run(signing_command, f"cannot sign identity certificate for {actor}")
         _run(
             [
                 "openssl",
@@ -265,6 +298,12 @@ def materialize_identities(
             for actor, identity in identities.items()
         },
         "subjects": artifacts.subject_names,
+        "expires_after_seconds": {
+            actor: identity.expires_after_seconds
+            for actor, participant in scenario.participants.items()
+            if (identity := participant.identity) is not None
+            and identity.expires_after_seconds is not None
+        },
     }
     manifest.write_text(
         json.dumps(manifest_value, indent=2, sort_keys=True) + "\n",

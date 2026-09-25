@@ -86,8 +86,20 @@ def parse_scenario(raw: Mapping[str, Any]) -> Scenario:
         if identity_raw is not None:
             if not isinstance(identity_raw, Mapping):
                 raise ScenarioError(f"participants.{name}.identity must be an object")
+            expires_after_seconds = identity_raw.get("expires_after_seconds")
+            if expires_after_seconds is not None and (
+                not isinstance(expires_after_seconds, int)
+                or isinstance(expires_after_seconds, bool)
+                or expires_after_seconds < 2
+                or expires_after_seconds > 86400
+            ):
+                raise ScenarioError(
+                    f"participants.{name}.identity.expires_after_seconds must be "
+                    "an integer between 2 and 86400"
+                )
             identity = IdentitySpec(
-                subject=_require_string(identity_raw, "subject", f"participants.{name}.identity")
+                subject=_require_string(identity_raw, "subject", f"participants.{name}.identity"),
+                expires_after_seconds=expires_after_seconds,
             )
         participants[name] = ParticipantSpec(
             name=name,

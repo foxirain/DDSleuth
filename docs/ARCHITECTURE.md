@@ -9,10 +9,10 @@ view. Its product is a ranked, replayable candidate trace—not an exploit proof
 Semantic scenario
        |
        v
-Trajectory generator -----> Distributed scheduler
-                                  |
-                                  v
-Implementation adapter ----> Normalized runtime events
+Trajectory pool ----------> Coverage-guided scheduler <---+
+                                  |                       |
+                                  v                       |
+Implementation adapter ----> Normalized runtime events ---+
                                   |
                                   v
                   Temporal/security invariant engine
@@ -45,6 +45,15 @@ the baseline causal barriers. `relaxed` schedules deliberately remove them and e
 join/order races. The generator always retains a baseline and uses a deterministic seed
 to select the remaining schedules under a fixed execution budget.
 
+The coverage-guided scheduler executes the causal baseline first and extracts
+semantic states plus actor-local and global transitions from each trace. Run-specific
+GUIDs, timestamps, fingerprints, and measurements are intentionally excluded. Runtime
+novelty rewards the schedule features that produced it; the next case balances those
+learned rewards with unseen static features. The report retains the exact selection
+order, per-trial novelty, and cumulative coverage. This is runtime protocol coverage,
+not compiler source-line coverage. Action plans may also receive stable,
+order-preserving timing jitter.
+
 Matrix dimensions remain useful for semantic controls, but they are inputs to the
 trajectory generator rather than the primary abstraction. Dotted paths can address
 array elements, allowing environment and command parameters of individual roles to be
@@ -74,6 +83,19 @@ Action plans are derived deterministically from the digested scenario, stored be
 the run logs, and exposed through a runner-reserved environment variable that scenario
 roles cannot replace.
 
+Participant reconnect is implemented by deleting the real secure participant and all
+contained entities, creating a new participant from the bound credentials, registering
+the type/topic again, and rematching endpoints. Credential revocation uses exact
+short-lived X.509 certificates and waits for the implementation authentication
+callback. In the Fast DDS observer build, remote revocation and the subsequent
+participant-key regeneration are separate events.
+
+Transport mutation is a distinct, opt-in boundary. The Fast DDS adapter can preload a
+small UDP shim only for roles with `transport.*` actions in a loopback scenario. It
+captures at most one bounded datagram and implements exact replay plus drop, delay, and
+duplication. Non-loopback addresses are passed through untouched. The library hash is
+part of evidence provenance.
+
 ## Evidence layer
 
 Events record observations, not conclusions. Examples include:
@@ -83,6 +105,8 @@ Events record observations, not conclusions. Examples include:
 - common sender or receiver-specific key material observed through a run-local HMAC;
 - endpoint destruction and recreation boundaries;
 - session rotation;
+- participant disconnect/reconnect and credential invalidation;
+- applied UDP drop, delay, duplication, or exact replay;
 - protected data returned by a real application reader;
 - scheduler or process divergence after a partial security trace.
 
@@ -121,6 +145,10 @@ The exploration aggregator clusters the same candidate across trajectories and
 repetitions. It reports occurrence rate, complete-run occurrences, schedule
 sensitivity, and whether the signal appeared only after schedule mutation. Candidate
 ranking never upgrades a lead into a CVSS or exploitability claim.
+
+Post-revocation writes are correlated with later application delivery by message. An
+actual delivery from a locally revoked participant is emitted as a `critical_lead`,
+while the mere ability to call a write API is not treated as compromise.
 
 ## Campaign layer
 

@@ -250,6 +250,15 @@ def _cmd_explore(args: argparse.Namespace) -> int:
         )
 
     output_root = Path(args.output_root)
+    pool_size = args.pool_size
+    if pool_size is None:
+        pool_size = (
+            min(4096, max(args.budget, args.budget * 4))
+            if args.strategy == "coverage-guided"
+            else args.budget
+        )
+    if pool_size < args.budget:
+        raise ValueError("--pool-size cannot be smaller than --budget")
     manifest = write_trajectory_manifest(
         Path(args.scenario),
         output_root / "trajectories",
@@ -257,10 +266,14 @@ def _cmd_explore(args: argparse.Namespace) -> int:
         dimension_strategy=args.dimension_strategy,
         spacings_ms=args.spacing_ms or (0, 25, 250),
         barrier_modes=args.barrier_mode or ("preserve", "relaxed"),
-        budget=args.budget,
+        action_jitters_ms=args.action_jitter_ms or (0, 10, 50),
+        budget=pool_size,
+        execution_budget=args.budget,
         seed=args.seed,
         overwrite=args.overwrite or args.resume,
     )
+    manifest_raw = json.loads(manifest.read_text(encoding="utf-8"))
+    execution_budget = int(manifest_raw["execution_budget"])
     campaign = run_campaign(
         manifest,
         output_root / "runs",
@@ -273,6 +286,9 @@ def _cmd_explore(args: argparse.Namespace) -> int:
         identity_config=identity_config,
         allow_unbound_configuration=args.allow_unbound_configuration,
         repetitions=args.repetitions,
+        selection_strategy=args.strategy,
+        execution_budget=execution_budget,
+        selection_seed=args.seed,
     )
     exploration_path = output_root / "exploration-report.json"
     exploration = analyze_exploration(
@@ -422,12 +438,29 @@ def _build_parser() -> argparse.ArgumentParser:
     explore.add_argument("scenario")
     explore.add_argument("--output-root", required=True)
     explore.add_argument("--budget", type=int, default=64)
+    explore.add_argument(
+        "--strategy",
+        choices=("coverage-guided", "manifest"),
+        default="coverage-guided",
+        help="select trajectories from runtime feedback or manifest order",
+    )
+    explore.add_argument(
+        "--pool-size",
+        type=int,
+        help="trajectory candidate pool (default: 4x execution budget for guided runs)",
+    )
     explore.add_argument("--seed", type=int, default=0)
     explore.add_argument("--spacing-ms", action="append", type=int)
     explore.add_argument(
         "--barrier-mode",
         action="append",
         choices=("preserve", "relaxed"),
+    )
+    explore.add_argument(
+        "--action-jitter-ms",
+        action="append",
+        type=int,
+        help="stable per-action timing perturbation included in the trajectory pool",
     )
     explore.add_argument("--dimension", action="append", default=[])
     explore.add_argument(

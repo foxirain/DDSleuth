@@ -183,6 +183,50 @@ class CandidateTests(unittest.TestCase):
         self.assertIn("no_declared_publish_authority", candidate.signals)
         self.assertEqual("publish", candidate.details["required_operation"])
 
+    def test_delivery_after_local_credential_revocation_is_a_critical_lead(self) -> None:
+        scenario = self._scenario()
+        events = [
+            self._event(
+                EventKind.CREDENTIAL_REVOKED,
+                "alice",
+                "revoked",
+                local_identity=True,
+                reason="certificate_expired",
+            ),
+            self._event(
+                EventKind.APPLICATION_SAMPLE_WRITTEN,
+                "alice",
+                "succeeded",
+                topic="SecretTopic",
+                message="after-revoke",
+            ),
+            self._event(
+                EventKind.APPLICATION_SAMPLE_RECEIVED,
+                "bob",
+                "received",
+                topic="SecretTopic",
+                message="after-revoke",
+            ),
+        ]
+        events.extend(
+            self._event(EventKind.PROCESS_EXIT, role.actor, "succeeded", exit_code=0)
+            for role in scenario.execution.roles
+        )
+        evidence = EvidenceBundle.create(
+            run_id="post-revocation-delivery",
+            scenario_id=scenario.scenario_id,
+            scenario_digest=scenario.digest,
+            implementation="fastdds",
+            events=events,
+        )
+        bundle = discover_candidates(scenario, evidence, evaluate(scenario, evidence))
+        candidate = next(
+            item for item in bundle.candidates
+            if item.family == "credential_revocation_bypass"
+        )
+        self.assertEqual("critical_lead", candidate.risk_tier)
+        self.assertEqual(99, candidate.score)
+
     def test_schedule_only_authorization_change_is_a_high_lead(self) -> None:
         scenario = self._scenario()
         baseline_events = [

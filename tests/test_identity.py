@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -70,6 +71,25 @@ class IdentityTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             with self.assertRaisesRegex(IdentityError, "slash-form"):
                 materialize_identities(scenario, Path(directory))
+
+    def test_generates_second_granularity_expiring_certificate(self) -> None:
+        raw = json.loads(
+            (ROOT / "examples/fastdds/three_party_recipient_binding.json").read_text()
+        )
+        raw["participants"]["mallory"]["identity"]["expires_after_seconds"] = 60
+        scenario = parse_scenario(raw)
+        with tempfile.TemporaryDirectory() as directory:
+            artifacts = materialize_identities(scenario, Path(directory))
+            completed = subprocess.run(
+                [
+                    "openssl", "x509", "-in",
+                    str(artifacts.participants["mallory"].certificate),
+                    "-noout", "-checkend", "120",
+                ],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            self.assertNotEqual(0, completed.returncode)
 
 
 if __name__ == "__main__":

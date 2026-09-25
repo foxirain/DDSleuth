@@ -138,3 +138,19 @@ index cf104dc09..b7955b354 100644
                              if (remote_participant_key == participant_->getGuid())
                              {
                                  EPROSIMA_LOG_INFO(SECURITY, "Process successful discovering local writer "
+@@ -4509,4 +4565,7 @@ bool SecurityManager::on_revoke_identity(
+     const bool is_local = (local_identity_handle_ != nullptr && &handle == local_identity_handle_);
+-
++    ddsleuth::fastdds_observer::observe_identity_revocation(
++        is_local ? participant_->getGuid() : plugin.get_participant_guid(handle),
++        is_local);
++
+     if (is_local)
+     {
+@@ -4794,4 +4853,5 @@ bool SecurityManager::revoke_remote_participant(
+     }
+-
++    ddsleuth::fastdds_observer::observe_participant_rekey(remote_guid);
++
+     bool redistribution_ok = true;
+     {

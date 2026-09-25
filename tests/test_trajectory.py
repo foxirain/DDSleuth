@@ -88,6 +88,7 @@ class TrajectoryTests(unittest.TestCase):
                 "trajectory.order": ["reader", "denied"],
                 "trajectory.spacing_ms": 0,
                 "trajectory.barrier_mode": "preserve",
+                "trajectory.action_jitter_ms": 0,
             },
             assignments,
         )
@@ -167,6 +168,59 @@ class TrajectoryTests(unittest.TestCase):
             self.assertEqual(1, candidate["semantic_configuration_count"])
             self.assertFalse(candidate["schedule_sensitive"])
             self.assertEqual(0, candidate["schedule_sensitive_configuration_count"])
+
+    def test_runtime_coverage_guides_a_bounded_pool(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            scenario_path = root / "scenario.json"
+            scenario_path.write_text(json.dumps(self._raw_scenario()), encoding="utf-8")
+            manifest = write_trajectory_manifest(
+                scenario_path,
+                root / "trajectories",
+                budget=6,
+                execution_budget=3,
+                spacings_ms=(0, 10, 20),
+                seed=11,
+            )
+            campaign = run_campaign(
+                manifest,
+                root / "runs",
+                {},
+                selection_strategy="coverage-guided",
+                execution_budget=3,
+                selection_seed=11,
+            )
+            self.assertEqual(3, campaign.case_count)
+            self.assertEqual(3, len(campaign.cases))
+            self.assertIsNotNone(campaign.selection)
+            assert campaign.selection is not None
+            self.assertEqual("runtime-coverage-guided", campaign.selection["strategy"])
+            self.assertEqual(6, campaign.selection["pool_size"])
+            trace = campaign.selection["selection_trace"]
+            self.assertTrue(trace[0]["baseline"])
+            self.assertGreater(campaign.selection["covered_runtime_features"], 0)
+
+    def test_action_jitter_mutates_plan_without_reordering_actions(self) -> None:
+        raw = self._raw_scenario()
+        raw["execution"]["roles"][0]["actions"] = [
+            {"id": "first", "at_ms": 10, "operation": "endpoint.create"},
+            {"id": "second", "at_ms": 20, "operation": "endpoint.destroy"},
+        ]
+        trajectories = generate_trajectories(
+            raw,
+            spacings_ms=(0,),
+            barrier_modes=("preserve",),
+            action_jitters_ms=(0, 25),
+            budget=2,
+        )
+        mutated = next(
+            case for case, assignments in trajectories
+            if assignments["trajectory.action_jitter_ms"] == 25
+        )
+        action_times = [
+            item["at_ms"] for item in mutated["execution"]["roles"][0]["actions"]
+        ]
+        self.assertEqual(sorted(action_times), action_times)
 
 
 if __name__ == "__main__":
