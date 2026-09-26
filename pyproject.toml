@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "ddsleuth"
 version = "0.2.0a1"
-description = "Stateful runtime security discovery for DDS implementations"
+description = "Stateful runtime artifact discovery for DDS security boundaries"
 readme = "README.md"
 requires-python = ">=3.11"
 authors = [{ name = "Taegu Ha" }]

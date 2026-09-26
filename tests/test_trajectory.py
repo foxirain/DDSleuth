@@ -6,12 +6,16 @@ import unittest
 from pathlib import Path
 
 from ddsleuth.campaign import run_campaign
-from ddsleuth.explorer import analyze_exploration
+from ddsleuth.explorer import _wilson_lower, analyze_exploration
 from ddsleuth.matrix import MatrixDimension
 from ddsleuth.trajectory import generate_trajectories, write_trajectory_manifest
 
 
 class TrajectoryTests(unittest.TestCase):
+    def test_reproducibility_uses_a_confidence_bound_not_raw_one_shot_success(self) -> None:
+        self.assertLess(_wilson_lower(1, 1), 0.25)
+        self.assertGreater(_wilson_lower(10, 10), 0.70)
+
     def _raw_scenario(self) -> dict[str, object]:
         ready = (
             'DDSLEUTH_EVENT {"kind":"probe.ready","actor":"reader",'
@@ -97,7 +101,7 @@ class TrajectoryTests(unittest.TestCase):
             any(item["trajectory.barrier_mode"] == "relaxed" for item in assignments)
         )
 
-    def test_end_to_end_exploration_ranks_runtime_candidate(self) -> None:
+    def test_end_to_end_exploration_clusters_runtime_artifacts(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             scenario_path = root / "scenario.json"
@@ -117,16 +121,16 @@ class TrajectoryTests(unittest.TestCase):
                 root / "exploration-report.json",
             )
             self.assertEqual(4, report["analyzed_trials"])
-            self.assertGreaterEqual(report["high_or_critical_leads"], 1)
+            self.assertGreaterEqual(report["artifact_cluster_count"], 1)
             families = {
                 item["family"]
-                for item in report["candidate_clusters"]
+                for item in report["artifact_clusters"]
             }
-            self.assertIn("policy_overgrant", families)
+            self.assertIn("boundary_episode", families)
             for result in campaign.cases:
-                self.assertTrue((root / "runs" / result.run_dir / "candidates.json").is_file())
+                self.assertTrue((root / "runs" / result.run_dir / "artifacts.json").is_file())
 
-    def test_semantic_specific_candidate_is_not_mislabeled_schedule_sensitive(self) -> None:
+    def test_semantic_specific_artifact_is_not_mislabeled_schedule_sensitive(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             raw = self._raw_scenario()
@@ -160,15 +164,15 @@ class TrajectoryTests(unittest.TestCase):
                 campaign,
                 root / "exploration-report.json",
             )
-            candidate = next(
+            artifact = next(
                 item
-                for item in report["candidate_clusters"]
-                if item["family"] == "policy_overgrant"
+                for item in report["artifact_clusters"]
+                if item["family"] == "boundary_episode" and item["outcome"] == "allowed"
             )
-            self.assertEqual(3, candidate["occurrences"])
-            self.assertEqual(1, candidate["semantic_configuration_count"])
-            self.assertFalse(candidate["schedule_sensitive"])
-            self.assertEqual(0, candidate["schedule_sensitive_configuration_count"])
+            self.assertEqual(3, artifact["occurrences"])
+            self.assertEqual(1, artifact["semantic_configuration_count"])
+            self.assertFalse(artifact["schedule_sensitive"])
+            self.assertEqual(0, artifact["schedule_sensitive_configuration_count"])
 
     def test_runtime_coverage_guides_a_bounded_pool(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -187,7 +191,7 @@ class TrajectoryTests(unittest.TestCase):
                 manifest,
                 root / "runs",
                 {},
-                selection_strategy="coverage-guided",
+                selection_strategy="artifact-guided",
                 execution_budget=3,
                 selection_seed=11,
             )
@@ -196,7 +200,7 @@ class TrajectoryTests(unittest.TestCase):
             self.assertIsNotNone(campaign.selection)
             assert campaign.selection is not None
             self.assertEqual(
-                "causal-security-coverage-guided",
+                "runtime-artifact-guided",
                 campaign.selection["strategy"],
             )
             self.assertEqual(6, campaign.selection["pool_size"])

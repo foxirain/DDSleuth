@@ -1,30 +1,80 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "urn:ddsleuth:schema:exploration-report:v1",
-  "title": "DDSleuth stateful exploration report",
+  "$id": "urn:ddsleuth:schema:exploration-report:v2",
+  "title": "DDSleuth runtime artifact exploration report",
   "type": "object",
   "required": [
     "schema_version", "exploration_kind", "manifest", "generated_trajectories",
     "expected_trials", "analyzed_trials", "complete_trials", "infrastructure_errors",
-    "candidate_cluster_count", "high_or_critical_leads", "candidate_clusters"
+    "artifact_cluster_count", "novel_artifact_clusters",
+    "mutation_only_artifact_clusters", "artifact_clusters"
   ],
   "properties": {
-    "schema_version": { "const": 1 },
-    "exploration_kind": { "const": "stateful_runtime_security_discovery" },
+    "schema_version": { "const": 2 },
+    "exploration_kind": { "const": "stateful_runtime_artifact_discovery" },
     "manifest": { "type": "string" },
     "base_scenario": { "type": ["string", "null"] },
     "seed": { "type": ["integer", "null"] },
     "budget": { "type": ["integer", "null"] },
+    "execution_budget": { "type": ["integer", "null"], "minimum": 1 },
     "generated_trajectories": { "type": "integer", "minimum": 1 },
     "expected_trials": { "type": "integer", "minimum": 1 },
     "analyzed_trials": { "type": "integer", "minimum": 0 },
     "complete_trials": { "type": "integer", "minimum": 0 },
     "infrastructure_errors": { "type": "integer", "minimum": 0 },
-    "candidate_cluster_count": { "type": "integer", "minimum": 0 },
-    "high_or_critical_leads": { "type": "integer", "minimum": 0 },
-    "candidate_clusters": { "type": "array", "items": { "type": "object" } },
-    "execution_budget": { "type": ["integer", "null"], "minimum": 1 },
-    "coverage_guidance": { "type": ["object", "null"] }
+    "artifact_cluster_count": { "type": "integer", "minimum": 0 },
+    "novel_artifact_clusters": { "type": "integer", "minimum": 0 },
+    "mutation_only_artifact_clusters": { "type": "integer", "minimum": 0 },
+    "artifact_clusters": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "artifact_id", "fingerprint", "family", "title", "observation_class",
+          "outcome", "research_priority", "novelty", "reproducibility",
+          "reproducibility_observed", "reproduction_occurrences", "reproduction_trials",
+          "semantic_prevalence", "baseline_divergence", "boundary_depth",
+          "evidence_quality", "occurrences", "analyzed_trials", "occurrence_rate",
+          "complete_occurrences", "schedule_sensitive", "semantic_configuration_count",
+          "schedule_sensitive_configuration_count", "only_under_mutation", "actors",
+          "resources", "boundary_phases", "causal_signature", "observations", "examples"
+        ],
+        "properties": {
+          "artifact_id": { "type": "string" },
+          "fingerprint": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+          "family": { "type": "string" },
+          "title": { "type": "string" },
+          "observation_class": { "type": "string" },
+          "outcome": { "type": "string" },
+          "research_priority": { "type": "integer", "minimum": 0, "maximum": 100 },
+          "novelty": { "type": "number", "minimum": 0, "maximum": 1 },
+          "reproducibility": { "type": "number", "minimum": 0, "maximum": 1 },
+          "reproducibility_observed": { "type": "number", "minimum": 0, "maximum": 1 },
+          "reproduction_occurrences": { "type": "integer", "minimum": 0 },
+          "reproduction_trials": { "type": "integer", "minimum": 0 },
+          "semantic_prevalence": { "type": "number", "minimum": 0, "maximum": 1 },
+          "baseline_divergence": { "type": "number", "minimum": 0, "maximum": 1 },
+          "boundary_depth": { "type": "integer", "minimum": 0 },
+          "evidence_quality": { "type": "number", "minimum": 0, "maximum": 1 },
+          "occurrences": { "type": "integer", "minimum": 1 },
+          "analyzed_trials": { "type": "integer", "minimum": 1 },
+          "occurrence_rate": { "type": "number", "minimum": 0, "maximum": 1 },
+          "complete_occurrences": { "type": "integer", "minimum": 0 },
+          "schedule_sensitive": { "type": "boolean" },
+          "semantic_configuration_count": { "type": "integer", "minimum": 1 },
+          "schedule_sensitive_configuration_count": { "type": "integer", "minimum": 0 },
+          "only_under_mutation": { "type": "boolean" },
+          "actors": { "type": "array", "items": { "type": "string" } },
+          "resources": { "type": "array", "items": { "type": "string" } },
+          "boundary_phases": { "type": "array", "items": { "type": "string" } },
+          "causal_signature": { "type": "array", "items": { "type": "string" } },
+          "observations": { "type": "object" },
+          "examples": { "type": "array", "items": { "type": "object" } }
+        },
+        "additionalProperties": false
+      }
+    },
+    "artifact_guidance": { "type": ["object", "null"] }
   },
   "additionalProperties": false
 }

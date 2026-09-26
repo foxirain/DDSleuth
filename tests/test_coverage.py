@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from ddsleuth.coverage import _frontier_score, extract_runtime_coverage, semantic_state
+from ddsleuth.coverage import _artifact_potential, extract_runtime_coverage, semantic_state
 from ddsleuth.evidence import EvidenceBundle
 from ddsleuth.models import EvidenceEvent
 
@@ -110,7 +110,23 @@ class RuntimeCoverageTests(unittest.TestCase):
         self.assertIn("reader:post_revocation_delivery", coverage.milestones)
         self.assertIn("post_revocation_application_delivery", coverage.anomalies)
         self.assertIn("causal:application:T:write->receive", coverage.transitions)
-        self.assertEqual(64.0, _frontier_score(coverage))
+        self.assertGreater(_artifact_potential(coverage), 0.0)
+
+    def test_actor_local_three_event_motif_is_stable_runtime_coverage(self) -> None:
+        bundle = EvidenceBundle.create(
+            run_id="run",
+            scenario_id="scenario",
+            scenario_digest="0" * 64,
+            implementation="fastdds",
+            events=(
+                EvidenceEvent("participant.disconnected", "alice", "fastdds", "disconnected"),
+                EvidenceEvent("participant.reconnected", "alice", "fastdds", "reconnected"),
+                EvidenceEvent("endpoint.recreated", "alice", "fastdds", "created"),
+            ),
+        )
+        coverage = extract_runtime_coverage(bundle)
+        self.assertEqual(1, len(coverage.motifs))
+        self.assertTrue(any(item.startswith("actor3:") for item in coverage.motifs))
 
 
 if __name__ == "__main__":

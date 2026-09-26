@@ -9,6 +9,7 @@ from ddsleuth.campaign import (
     CampaignError,
     IdentityMaterializationConfig,
     PolicyMaterializationConfig,
+    load_campaign_report,
     load_manifest,
     run_campaign,
 )
@@ -264,6 +265,26 @@ class CampaignTests(unittest.TestCase):
             self.assertEqual(1, report.counts["error"])
             self.assertEqual("inconclusive", report.cases[0].verdict)
             self.assertIn("digest mismatch", report.cases[0].error["message"])
+
+    def test_persisted_campaign_can_be_loaded_for_offline_artifact_analysis(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            base = root / "base.json"
+            base.write_text(json.dumps(_scenario()), encoding="utf-8")
+            manifest = write_matrix(
+                base,
+                root / "matrix",
+                [parse_dimension('governance.rtps_protection=["sign"]')],
+            )
+            report = run_campaign(
+                manifest,
+                root / "runs",
+                {},
+                allow_unbound_configuration=True,
+            )
+            loaded = load_campaign_report(root / "runs" / "campaign-report.json")
+            self.assertEqual(report.manifest_digest, loaded.manifest_digest)
+            self.assertEqual(report.to_dict(), loaded.to_dict())
 
 
 if __name__ == "__main__":

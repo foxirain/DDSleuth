@@ -3,25 +3,26 @@
 ## Design goal
 
 DDSleuth searches runtime states that are poorly represented by a static control-flow
-view. Its product is a ranked, replayable candidate trace—not an exploit proof.
+view. Its product is a neutral, replayable behavioral artifact—not a vulnerability
+verdict or exploit proof.
 
 ```text
 Semantic scenario
        |
        v
-Trajectory pool ----------> Coverage-guided scheduler <---+
+Trajectory pool ----------> Artifact-guided scheduler <---+
                                   |                       |
                                   v                       |
 Implementation adapter ----> Normalized runtime events ---+
                                   |
                                   v
-                  Temporal/security invariant engine
+                 Semantic state and causal motif engine
                                   |
                                   v
-                 Candidate extraction and clustering
+                  Artifact slicing and clustering
                                   |
                                   v
-                    Ranked replayable runtime leads
+                 Ranked replayable observations
 ```
 
 Source scanning, exploit generation, exploitability proof, and disclosure writing are
@@ -45,17 +46,20 @@ the baseline causal barriers. `relaxed` schedules deliberately remove them and e
 join/order races. The generator always retains a baseline and uses a deterministic seed
 to select the remaining schedules under a fixed execution budget.
 
-The coverage-guided scheduler executes one causal baseline first and then immediately
-uses feedback. It extracts semantic states, actor-local transitions, shared-identifier
-causal edges, security milestones, and anomaly proximity from each trace. Global log
+The artifact-guided scheduler executes one causal baseline first and then immediately
+uses feedback. It extracts semantic states, actor-local transitions and three-event
+motifs, shared-identifier causal edges, boundary milestones, and runtime diagnostics
+from each trace. Global log
 adjacency is excluded because poll/buffer order is not protocol causality. Run-specific
-GUIDs, timestamps, fingerprints, and measurements are also excluded. New anomalies,
-milestones, causal edges, and states receive descending weights; the next case balances
-those learned rewards with unseen static features and an exploration term. The report
-retains the exact selection order, weighted reward, zero-progress streak, and cumulative
-coverage. A configurable plateau terminates unproductive campaigns. This is runtime
-protocol coverage, not compiler source-line coverage. Action plans may also receive
-stable, order-preserving timing jitter.
+GUIDs, timestamps, fingerprints, and measurements are also excluded. New diagnostics,
+milestones, causal edges, motifs, and states receive descending weights. Boundary
+composition is rewarded by depth—the number of distinct identity, authorization, key,
+lifecycle, transport, and application phases actually crossed—without predicting
+severity. The next case balances learned artifact yield with unseen static features
+and an exploration term. The report retains selection order, novelty reward,
+artifact-potential reward, zero-progress streak, and cumulative coverage. A
+configurable plateau terminates unproductive campaigns. This is runtime protocol
+coverage, not compiler source-line coverage.
 
 Matrix dimensions remain useful for semantic controls, but they are inputs to the
 trajectory generator rather than the primary abstraction. Dotted paths can address
@@ -76,8 +80,8 @@ Native scenarios coordinate roles with structured event barriers. Launch offsets
 exploration mutations, not causal evidence. A source process that exits early or a
 barrier timeout is not a passing security result. The adapter nevertheless preserves
 events produced before the divergence, adds `execution.divergence`, and records
-unlaunched roles. Candidate extraction can retain an earlier overgrant or key-route
-anomaly without pretending the complete experiment succeeded.
+unlaunched roles. Artifact extraction can retain observations before the divergence
+without pretending the complete experiment succeeded.
 
 Every role records the basename, size, and SHA-256 of its resolved executable. Policy,
 identity-certificate, scenario, and executable digests form the configuration
@@ -121,9 +125,9 @@ Secret key bytes are never required in the normalized evidence format. Native ev
 carry monotonic timestamps so cross-process temporal checks do not depend on filename
 or buffered log order.
 
-## Semantic invariant layer
+## Optional invariant layer
 
-Oracles evaluate declared properties and return `pass`, `violation`, or
+Compatibility oracles evaluate declared properties and return `pass`, `violation`, or
 `not_applicable` with exact event indexes. They are fail-closed: incomplete observation
 does not become a pass. Capability assessment remains separate from root-cause
 classification.
@@ -140,22 +144,32 @@ subscribe authority and received `datareader` material requires local publish
 authority. This prevents normal protected writer/reader pairing from being promoted
 as unauthorized key delivery.
 
-## Candidate layer
+## Artifact layer
 
-Candidates are discovery leads, not vulnerability verdicts. A candidate has a stable
-semantic fingerprint, risk tier, priority score, confidence, actors, resources, exact
-event indexes, and the schedule that exposed it. Policy overgrant, unauthorized
-application delivery, unauthorized user-key delivery, temporal invariant violations,
-and partial stateful divergences are extracted independently of process success.
+Artifacts are observed runtime behavior, including behavior that demonstrates a
+defense working correctly. Each artifact has a stable semantic fingerprint, actors,
+resources, exact evidence indexes, a normalized causal signature, crossed boundary
+phases, evidence quality, and an outcome. It has no risk tier, CVSS, or exploitability
+claim.
 
-The exploration aggregator clusters the same candidate across trajectories and
-repetitions. It reports occurrence rate, complete-run occurrences, schedule
-sensitivity, and whether the signal appeared only after schedule mutation. Candidate
-ranking never upgrades a lead into a CVSS or exploitability claim.
+Extraction has two complementary paths. Pattern-independent boundary episodes retain
+a short actor-local window around authorization, credential, key, lifecycle,
+transport, and diagnostic boundaries. Interpretable extractors additionally record
+local/remote revocation enforcement splits, replay suppression or redelivery,
+participant key-epoch transitions, and runtime diagnostics. Explicit action IDs,
+messages, and run-local key identifiers close the causal slice; cross-process log
+adjacency never does.
 
-Post-revocation writes are correlated with later application delivery by message. An
-actual delivery from a locally revoked participant is emitted as a `critical_lead`,
-while the mere ability to call a write API is not treated as compromise.
+Each semantic configuration retains a baseline. Mutated executions are projected into
+count-bucketed states, causal transitions, actor motifs, milestones, and diagnostics.
+Any change is exported as a baseline differential artifact, without deciding which
+side is correct.
+
+The exploration aggregator clusters artifacts across schedules and repetitions. It
+reports novelty, exact-trajectory reproducibility, semantic prevalence, baseline
+divergence, boundary depth, evidence quality, schedule sensitivity, and mutation-only
+status separately. A derived `research_priority` orders manual or model-assisted
+review; it is explicitly not vulnerability severity.
 
 ## Campaign layer
 

@@ -7,10 +7,18 @@ Python pre-release spelling used for packages (`0.1.0a1`) and a human-readable G
 ## 0.2.0-alpha.1 — Unreleased
 
 - reposition the core as stateful runtime security discovery rather than a PoC prover;
+- make neutral runtime artifacts, rather than vulnerability candidates, the default
+  output of run, campaign, and exploration workflows;
+- add stable artifact fingerprints, bounded causal evidence slices, boundary-phase
+  depth, and count-bucketed baseline behavior differentials;
+- rank research value using separate novelty, reproducibility, semantic prevalence,
+  baseline divergence, boundary depth, and evidence-quality dimensions;
+- support deterministic offline reanalysis of persisted campaign evidence without
+  rerunning the DDS implementation;
 - add deterministic role-order, launch-spacing, and barrier-mode trajectory search;
 - preserve normalized evidence when a later process or event barrier diverges;
-- extract and rank stable runtime candidates independently of pass/inconclusive status;
-- cluster candidates across schedules and mark mutation-only signals;
+- extract and rank stable runtime artifacts independently of pass/inconclusive status;
+- cluster artifacts across schedules and mark mutation-only observations;
 - support numeric array components in matrix mutation paths;
 - infer unauthorized application delivery directly from declared policy;
 - split Fast DDS common sender and recipient-specific key fingerprints to prevent
@@ -20,7 +28,7 @@ Python pre-release spelling used for packages (`0.1.0a1`) and a human-readable G
 - always retain a zero-offset causal baseline and compare schedule sensitivity within
   each semantic matrix configuration;
 - collapse identical token-route retransmissions during schedule differencing so
-  reliable-transport retries do not become security candidates;
+  reliable-transport retries do not become false differential artifacts;
 - add validated, runner-materialized timed role action plans and Fast DDS scripted
   endpoint lifecycle execution inside long-lived secure participants;
 - add real secure-participant disconnect/reconnect and pre/post delivery scenarios;
@@ -32,8 +40,8 @@ Python pre-release spelling used for packages (`0.1.0a1`) and a human-readable G
   with library provenance bound into evidence;
 - add runtime semantic state/transition coverage and feedback-guided selection from a
   trajectory pool, including stable order-preserving action timing jitter;
-- promote only correlated post-revocation application delivery—not a local write
-  attempt—into a critical discovery lead.
+- distinguish correlated post-revocation delivery from the benign but useful
+  local-write/remote-suppression enforcement artifact;
 - fail closed unless every requested transport mutation emits an action-correlated
   applied event, and force Fast DDS transport experiments away from SHM/DataSharing;
 - synchronize native transport actions with the probe and add explicit wire-image
@@ -43,7 +51,7 @@ Python pre-release spelling used for packages (`0.1.0a1`) and a human-readable G
   weighted security milestones, frontier scoring, and plateau termination;
 - pair semantic controls with dynamic mutations so a large matrix cannot consume the
   entire trajectory pool with baselines;
-- normalize ASan/UBSan/TSan/MSan memory failures into ranked High discovery leads;
+- normalize ASan/UBSan/TSan/MSan memory failures into neutral runtime diagnostics;
 - preserve exact large logs as gzip while keeping compact event-complete text logs.
 
 ## 0.1.0-alpha.1 — 2026-09-26

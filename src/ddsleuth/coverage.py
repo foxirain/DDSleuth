@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import Iterable
 
@@ -56,6 +57,7 @@ class RuntimeCoverage:
     transitions: frozenset[str]
     milestones: frozenset[str] = frozenset()
     anomalies: frozenset[str] = frozenset()
+    motifs: frozenset[str] = frozenset()
 
     @property
     def features(self) -> frozenset[str]:
@@ -63,6 +65,7 @@ class RuntimeCoverage:
             {
                 *(f"state:{item}" for item in self.states),
                 *(f"transition:{item}" for item in self.transitions),
+                *(f"motif:{item}" for item in self.motifs),
                 *(f"milestone:{item}" for item in self.milestones),
                 *(f"anomaly:{item}" for item in self.anomalies),
             }
@@ -148,9 +151,11 @@ def extract_runtime_coverage(evidence: EvidenceBundle) -> RuntimeCoverage:
 
     states: set[str] = set()
     transitions: set[str] = set()
+    motifs: set[str] = set()
     milestones: set[str] = set()
     anomalies: set[str] = set()
     previous_by_actor: dict[str, str] = {}
+    history_by_actor: dict[str, list[str]] = defaultdict(list)
     action_started: dict[tuple[str, str], str] = {}
     faults_armed: dict[tuple[str, str], str] = {}
     generated_keys: dict[str, str] = {}
@@ -166,6 +171,10 @@ def extract_runtime_coverage(evidence: EvidenceBundle) -> RuntimeCoverage:
         if previous_actor is not None:
             transitions.add(f"actor:{previous_actor}->{state}")
         previous_by_actor[event.actor] = state
+        actor_history = history_by_actor[event.actor]
+        actor_history.append(state)
+        if len(actor_history) >= 3:
+            motifs.add(f"actor3:{'->'.join(actor_history[-3:])}")
         milestones.update(_event_milestones(event))
 
         action_id = event.attributes.get("action_id")
@@ -246,10 +255,11 @@ def extract_runtime_coverage(evidence: EvidenceBundle) -> RuntimeCoverage:
             anomalies.add(f"fault_application_failed:{event.attributes.get('fault', 'unknown')}")
 
     return RuntimeCoverage(
-        frozenset(states),
-        frozenset(transitions),
-        frozenset(milestones),
-        frozenset(anomalies),
+        states=frozenset(states),
+        transitions=frozenset(transitions),
+        milestones=frozenset(milestones),
+        anomalies=frozenset(anomalies),
+        motifs=frozenset(motifs),
     )
 
 
@@ -283,40 +293,48 @@ def _feature_weight(feature: str) -> float:
         return 8.0
     if feature.startswith("transition:causal:"):
         return 4.0
+    if feature.startswith("motif:"):
+        return 2.0
     if feature.startswith("transition:"):
         return 1.0
     return 0.25
 
 
-def _frontier_score(coverage: RuntimeCoverage) -> float:
-    """Score proximity to a security boundary, not generic execution depth."""
+def _artifact_potential(coverage: RuntimeCoverage) -> float:
+    """Reward deep boundary composition without making a vulnerability claim."""
 
-    if coverage.anomalies & {
-        "post_revocation_application_delivery",
-        "duplicate_application_delivery",
-    }:
-        return 64.0
-    if any(item.endswith(":post_revocation_write") for item in coverage.milestones):
-        return 20.0
-    replay_applied = any(
-        item.endswith(":fault_applied:replay_last") for item in coverage.milestones
+    phases: set[str] = set()
+    for milestone in coverage.milestones:
+        if "credential_" in milestone or "peer_authenticated" in milestone:
+            phases.add("identity")
+        if "authorization:" in milestone:
+            phases.add("authorization")
+        if "key_" in milestone:
+            phases.add("key_lifecycle")
+        if "endpoint_" in milestone or "participant_" in milestone:
+            phases.add("lifecycle")
+        if "fault_" in milestone:
+            phases.add("transport")
+        if "sample_" in milestone or "observation_complete:" in milestone:
+            phases.add("application")
+    depth_reward = float(len(phases) * len(phases))
+    causal_reward = min(
+        12.0,
+        2.0
+        * sum(transition.startswith("causal:") for transition in coverage.transitions),
     )
-    observation_complete = any(
-        ":observation_complete:" in item for item in coverage.milestones
-    )
-    if replay_applied and observation_complete:
-        return 12.0
-    reconnected = any(
-        item.endswith(":participant_reconnected") for item in coverage.milestones
-    )
-    recreated = any(item.endswith(":endpoint_recreated") for item in coverage.milestones)
-    if reconnected and recreated:
-        return 8.0
-    return 0.0
+    anomaly_reward = min(24.0, 8.0 * len(coverage.anomalies))
+    return depth_reward + causal_reward + anomaly_reward
+
+
+def _frontier_score(coverage: RuntimeCoverage) -> float:
+    """Compatibility alias for the pre-artifact scheduler API."""
+
+    return _artifact_potential(coverage)
 
 
 @dataclass(slots=True)
-class CoverageGuidedScheduler:
+class ArtifactGuidedScheduler:
     cases: tuple[ManifestCase, ...]
     seed: int = 0
     _static: dict[int, frozenset[str]] = field(init=False, default_factory=dict)
@@ -381,32 +399,28 @@ class CoverageGuidedScheduler:
         combined: set[str] = set()
         state_count = 0
         transition_count = 0
+        motif_count = 0
         milestone_count = 0
         anomaly_count = 0
         valid_execution = True
-        frontier_score = 0.0
-        security_anomaly = False
+        artifact_potential = 0.0
+        runtime_anomaly = False
         for bundle in evidence:
             coverage = extract_runtime_coverage(bundle)
             state_count += len(coverage.states)
             transition_count += len(coverage.transitions)
+            motif_count += len(coverage.motifs)
             milestone_count += len(coverage.milestones)
             anomaly_count += len(coverage.anomalies)
             if bundle.metadata.get("execution_error") is not None:
                 valid_execution = False
                 continue
-            frontier_score = max(frontier_score, _frontier_score(coverage))
-            security_anomaly = security_anomaly or bool(
-                coverage.anomalies
-                & {
-                    "post_revocation_application_delivery",
-                    "duplicate_application_delivery",
-                }
-            )
+            artifact_potential = max(artifact_potential, _artifact_potential(coverage))
+            runtime_anomaly = runtime_anomaly or bool(coverage.anomalies)
             combined.update(coverage.features)
         new_runtime = combined - self._seen_runtime
         novelty_reward = sum(_feature_weight(feature) for feature in new_runtime)
-        reward = novelty_reward + frontier_score
+        reward = novelty_reward + artifact_potential
         features = self._static[case.index]
         for feature in features:
             self._feature_visits[feature] = self._feature_visits.get(feature, 0) + 1
@@ -415,7 +429,7 @@ class CoverageGuidedScheduler:
         self._seen_runtime.update(combined)
         self._selected.add(case.index)
         self._no_progress_runs = (
-            0 if (new_runtime or security_anomaly) else self._no_progress_runs + 1
+            0 if (new_runtime or runtime_anomaly) else self._no_progress_runs + 1
         )
         self._trace.append(
             {
@@ -426,12 +440,13 @@ class CoverageGuidedScheduler:
                 "static_feature_count": len(features),
                 "runtime_state_count": state_count,
                 "runtime_transition_count": transition_count,
+                "runtime_motif_count": motif_count,
                 "runtime_milestone_count": milestone_count,
                 "runtime_anomaly_count": anomaly_count,
                 "valid_execution": valid_execution,
                 "new_runtime_features": len(new_runtime),
                 "novelty_reward": round(novelty_reward, 3),
-                "security_frontier_score": round(frontier_score, 3),
+                "artifact_potential_score": round(artifact_potential, 3),
                 "weighted_reward": round(reward, 3),
                 "no_progress_runs": self._no_progress_runs,
                 "cumulative_runtime_features": len(self._seen_runtime),
@@ -447,7 +462,7 @@ class CoverageGuidedScheduler:
 
     def summary(self, pool_size: int, execution_budget: int) -> dict[str, JsonValue]:
         result: dict[str, JsonValue] = {
-            "strategy": "causal-security-coverage-guided",
+            "strategy": "runtime-artifact-guided",
             "seed": self.seed,
             "pool_size": pool_size,
             "execution_budget": execution_budget,
@@ -460,3 +475,7 @@ class CoverageGuidedScheduler:
         if self._stop_reason is not None:
             result["stop_reason"] = self._stop_reason
         return result
+
+
+# Source compatibility for integrations that imported the alpha scheduler class.
+CoverageGuidedScheduler = ArtifactGuidedScheduler

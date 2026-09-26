@@ -55,6 +55,8 @@ def main() -> None:
             "/README.md",
             "/SECURITY.md",
             "/scripts/release-check.sh",
+            "/schemas/artifacts.schema.json",
+            "/docs/ARTIFACT_MODEL.md",
             "/tests/test_scenario.py",
             "/probes/fastdds_instrumentation/fastdds-f6376882-ddsleuth-observer.patch",
         )

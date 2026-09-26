@@ -8,12 +8,13 @@ from typing import Sequence
 
 from .adapters.fastdds import FastDDSAdapter, FastDDSLegacyTextImporter
 from . import __version__
+from .artifacts import discover_artifacts, write_artifacts
 from .campaign import (
     IdentityMaterializationConfig,
     PolicyMaterializationConfig,
+    load_campaign_report,
     run_campaign,
 )
-from .candidates import discover_candidates, write_candidates
 from .evidence import EvidenceBundle, load_evidence, write_evidence
 from .identity import materialize_identities
 from .matrix import parse_dimension, write_matrix
@@ -80,17 +81,34 @@ def _cmd_evaluate(args: argparse.Namespace) -> int:
     scenario = load_scenario(args.scenario)
     evidence = load_evidence(args.evidence)
     report = evaluate(scenario, evidence)
-    candidates = discover_candidates(scenario, evidence, report)
+    artifacts = discover_artifacts(scenario, evidence)
     if args.output:
         write_report(report, args.output)
     else:
         _write_or_print_json(report.to_dict(), None)
+    if args.artifacts_output:
+        write_artifacts(artifacts, args.artifacts_output)
     if args.candidates_output:
-        write_candidates(candidates, args.candidates_output)
+        from .candidates import discover_candidates, write_candidates
+
+        write_candidates(
+            discover_candidates(scenario, evidence, report),
+            args.candidates_output,
+        )
     print(concise_summary(report))
     if report.failed_processes or report.incomplete_processes:
         return 3
     return 2 if args.fail_on_violation and report.verdict == "violation" else 0
+
+
+def _cmd_extract_artifacts(args: argparse.Namespace) -> int:
+    scenario = load_scenario(args.scenario)
+    evidence = load_evidence(args.evidence)
+    bundle = discover_artifacts(scenario, evidence)
+    write_artifacts(bundle, args.output)
+    print(f"artifacts={len(bundle.artifacts)}")
+    print(f"output={args.output}")
+    return 0
 
 
 def _cmd_run(args: argparse.Namespace) -> int:
@@ -114,12 +132,12 @@ def _cmd_run(args: argparse.Namespace) -> int:
     write_evidence(evidence, evidence_path)
     report = evaluate(scenario, evidence)
     write_report(report, report_path)
-    candidates_path = run_dir / "candidates.json"
-    write_candidates(discover_candidates(scenario, evidence, report), candidates_path)
+    artifacts_path = run_dir / "artifacts.json"
+    write_artifacts(discover_artifacts(scenario, evidence), artifacts_path)
     print(concise_summary(report))
     print(f"evidence={evidence_path}")
     print(f"report={report_path}")
-    print(f"candidates={candidates_path}")
+    print(f"artifacts={artifacts_path}")
     if report.failed_processes or report.incomplete_processes:
         return 3
     return 2 if args.fail_on_violation and report.verdict == "violation" else 0
@@ -254,7 +272,7 @@ def _cmd_explore(args: argparse.Namespace) -> int:
     if pool_size is None:
         pool_size = (
             min(4096, max(args.budget, args.budget * 4))
-            if args.strategy == "coverage-guided"
+            if args.strategy in ("artifact-guided", "coverage-guided")
             else args.budget
         )
     if pool_size < args.budget:
@@ -301,20 +319,34 @@ def _cmd_explore(args: argparse.Namespace) -> int:
     print(f"trajectories={exploration['generated_trajectories']}")
     print(f"trials={exploration['expected_trials']}")
     print(f"analyzed={exploration['analyzed_trials']}")
-    print(f"candidate_clusters={exploration['candidate_cluster_count']}")
-    print(f"high_or_critical_leads={exploration['high_or_critical_leads']}")
+    print(f"artifact_clusters={exploration['artifact_cluster_count']}")
+    print(f"mutation_only_artifacts={exploration['mutation_only_artifact_clusters']}")
     print(f"report={exploration_path}")
     if campaign.counts["error"]:
         return 3
-    if args.fail_on_candidate and exploration["candidate_cluster_count"]:
+    if (args.fail_on_artifact or args.fail_on_candidate) and exploration["artifact_cluster_count"]:
         return 2
+    return 0
+
+
+def _cmd_analyze_exploration(args: argparse.Namespace) -> int:
+    campaign = load_campaign_report(args.campaign_report)
+    report = analyze_exploration(
+        Path(args.manifest),
+        Path(args.run_root),
+        campaign,
+        Path(args.output),
+    )
+    print(f"artifact_clusters={report['artifact_cluster_count']}")
+    print(f"novel_artifacts={report['novel_artifact_clusters']}")
+    print(f"output={args.output}")
     return 0
 
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="ddsleuth",
-        description="Policy-aware DDS Security invariant testing",
+        description="Runtime artifact discovery for DDS security boundaries",
     )
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -340,9 +372,19 @@ def _build_parser() -> argparse.ArgumentParser:
     evaluate_parser.add_argument("scenario")
     evaluate_parser.add_argument("evidence")
     evaluate_parser.add_argument("--output")
+    evaluate_parser.add_argument("--artifacts-output")
     evaluate_parser.add_argument("--candidates-output")
     evaluate_parser.add_argument("--fail-on-violation", action="store_true")
     evaluate_parser.set_defaults(handler=_cmd_evaluate)
+
+    extract_artifacts = subparsers.add_parser(
+        "extract-artifacts",
+        help="extract neutral runtime artifacts from normalized evidence",
+    )
+    extract_artifacts.add_argument("scenario")
+    extract_artifacts.add_argument("evidence")
+    extract_artifacts.add_argument("--output", required=True)
+    extract_artifacts.set_defaults(handler=_cmd_extract_artifacts)
 
     run = subparsers.add_parser("run", help="run a scenario with its implementation adapter")
     run.add_argument("scenario")
@@ -434,28 +476,28 @@ def _build_parser() -> argparse.ArgumentParser:
 
     explore = subparsers.add_parser(
         "explore",
-        help="discover runtime security candidates across stateful role schedules",
+        help="discover runtime artifacts across stateful DDS security boundaries",
     )
     explore.add_argument("scenario")
     explore.add_argument("--output-root", required=True)
     explore.add_argument("--budget", type=int, default=64)
     explore.add_argument(
         "--strategy",
-        choices=("coverage-guided", "manifest"),
-        default="coverage-guided",
-        help="select trajectories from runtime feedback or manifest order",
+        choices=("artifact-guided", "coverage-guided", "manifest"),
+        default="artifact-guided",
+        help="select trajectories from artifact novelty feedback or manifest order",
     )
     explore.add_argument(
         "--pool-size",
         type=int,
-        help="trajectory candidate pool (default: 4x execution budget for guided runs)",
+        help="trajectory pool (default: 4x execution budget for guided runs)",
     )
     explore.add_argument("--seed", type=int, default=0)
     explore.add_argument(
         "--plateau-window",
         type=int,
         default=20,
-        help="stop after this many trajectories add no runtime coverage (0 disables)",
+        help="stop after this many trajectories add no runtime artifact features (0 disables)",
     )
     explore.add_argument("--spacing-ms", action="append", type=int)
     explore.add_argument(
@@ -480,7 +522,12 @@ def _build_parser() -> argparse.ArgumentParser:
     explore.add_argument("--resume", action="store_true")
     explore.add_argument("--stop-on-error", action="store_true")
     explore.add_argument("--allow-external", action="store_true")
-    explore.add_argument("--fail-on-candidate", action="store_true")
+    explore.add_argument("--fail-on-artifact", action="store_true")
+    explore.add_argument(
+        "--fail-on-candidate",
+        action="store_true",
+        help=argparse.SUPPRESS,
+    )
     explore.add_argument("--repetitions", type=int, default=1)
     explore.add_argument("--materialize-policies", action="store_true")
     explore.add_argument("--materialize-identities", action="store_true")
@@ -496,6 +543,16 @@ def _build_parser() -> argparse.ArgumentParser:
     explore.add_argument("--not-after", default="2038-01-01T00:00:00")
     explore.add_argument("--allow-unbound-configuration", action="store_true")
     explore.set_defaults(handler=_cmd_explore)
+
+    analyze = subparsers.add_parser(
+        "analyze-exploration",
+        help="rebuild artifact clusters from an existing trajectory campaign",
+    )
+    analyze.add_argument("manifest")
+    analyze.add_argument("--run-root", required=True)
+    analyze.add_argument("--campaign-report", required=True)
+    analyze.add_argument("--output", required=True)
+    analyze.set_defaults(handler=_cmd_analyze_exploration)
     return parser
 
 

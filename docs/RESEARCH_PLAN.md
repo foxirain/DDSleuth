@@ -2,17 +2,18 @@
 
 ## Thesis
 
-Security faults that static analysis misses can be found systematically by exploring
-multi-principal runtime trajectories and checking temporal, authorization, key-routing,
-lifecycle, and application-delivery invariants across distributed state transitions.
+Security-relevant runtime artifacts that static analysis cannot directly observe can
+be found systematically by exploring multi-principal trajectories, modeling causal
+state transitions, and preserving compact evidence at protocol boundaries. Separate
+downstream analysis determines whether an artifact is a vulnerability.
 
 ## Research questions
 
-1. Which state-, timing-, and order-dependent security faults are missed by conventional static analysis and packet fuzzing?
-2. How much of one invariant suite can be reused across independent DDS Security implementations?
-3. Which topology, lifecycle, and interoperability mutations expose the most security boundary violations?
-4. Which runtime signals most reliably predict a later validated High/Critical finding?
-5. What false-positive and nondeterminism rates result from each observation mode?
+1. Which state-, timing-, and order-dependent behaviors are observable only in live DDS executions?
+2. Which event, causal, and artifact abstractions transfer across DDS Security implementations?
+3. Which topology, lifecycle, transport, and interoperability mutations maximize novel artifact yield?
+4. How well do novelty, boundary depth, differential behavior, and reproducibility prioritize later research?
+5. What nondeterminism and instrumentation-divergence rates result from each observation mode?
 
 ## Milestones
 
@@ -53,9 +54,9 @@ lifecycle, and application-delivery invariants across distributed state transiti
 
 - [x] Deterministic role-order, barrier-mode, and launch-spacing trajectories.
 - [x] Preserve partial security traces after process and barrier divergence.
-- [x] Extract policy overgrant, unauthorized delivery, user-key route, temporal,
-  and execution-divergence candidates independently of trial verdict.
-- [x] Cluster candidates across schedules and rank schedule-sensitive leads.
+- [x] Preserve legacy security leads as an optional compatibility analysis layer.
+- [x] Extract neutral boundary behavior independently of trial verdict.
+- [x] Cluster artifacts across schedules and rank research value without severity.
 - [x] Split common sender and recipient-specific Fast DDS key semantics.
 - [x] Vendor-neutral timed role actions with a Fast DDS executor for endpoint create,
   match, write/wait, destroy, and recreation inside one long-lived participant.
@@ -64,13 +65,25 @@ lifecycle, and application-delivery invariants across distributed state transiti
 - [x] Runtime coverage feedback over semantic states and transitions rather than source
   lines, with bounded pool selection and an auditable selection trace.
 - [x] Replace cross-process adjacency with actor-local and shared-identifier causal
-  coverage, weighted security milestones, and High/Critical frontier scoring.
+  coverage, actor-local motifs, boundary-depth scoring, and artifact guidance.
 - [x] Fail closed when a requested transport mutation was not applied, force Fast DDS
   transport experiments onto UDP, and bind replay to an explicit captured wire image.
 - [x] Add post-attack observation windows, coverage-plateau termination, and bounded
   lossless archival of repetitive runtime logs.
-- [x] Normalize sanitizer-confirmed native memory-safety failures into ranked High
-  discovery leads instead of generic process divergence.
+- [x] Normalize sanitizer-confirmed native memory-safety failures into neutral runtime
+  diagnostic artifacts instead of generic process divergence.
+- [x] Add bounded causal slices and count-bucketed baseline behavior differentials.
+- [x] Separate novelty, reproducibility, semantic prevalence, baseline divergence,
+  boundary depth, and evidence quality in the exploration report.
+
+### M3.6 — Artifact minimization and adaptive mutation
+
+- Add automatic trajectory delta debugging for mutation-only artifacts.
+- Learn action-window mutations from observed boundary intervals rather than fixed jitter alone.
+- Add partial-order reduction for independent actor actions.
+- Add sequence-aware transport targeting for RTPS submessage classes.
+- Add cross-run cluster persistence and corpus deduplication.
+- Add deterministic campaign checkpoint/resume for scheduler state.
 
 ### M4 — Second implementation
 
@@ -89,7 +102,8 @@ lifecycle, and application-delivery invariants across distributed state transiti
 - Known-vulnerability and seeded-bug benchmark corpus.
 - Detection, false-positive, repeatability, and minimization measurements.
 - Comparison with static analysis and protocol fuzzing baselines.
-- Candidate precision, schedule sensitivity, and validated High/Critical yield.
+- Artifact precision after manual semantic classification, schedule sensitivity,
+  causal-slice reduction, cluster stability, and downstream validated-finding yield.
 - Reproducible containers and paper artifact.
 
 ## Publication gates

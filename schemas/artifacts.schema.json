@@ -1,0 +1,72 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:ddsleuth:schema:artifacts:v1",
+  "title": "DDSleuth neutral runtime artifacts",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "scenario_id",
+    "scenario_digest",
+    "run_id",
+    "artifact_count",
+    "artifacts"
+  ],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "scenario_id": { "type": "string", "minLength": 1 },
+    "scenario_digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "run_id": { "type": "string", "minLength": 1 },
+    "artifact_count": { "type": "integer", "minimum": 0 },
+    "artifacts": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "artifact_id", "fingerprint", "family", "title", "observation_class",
+          "outcome", "actors", "resources", "evidence_events", "causal_signature",
+          "boundary_phases", "boundary_depth", "evidence_quality",
+          "execution_complete", "observations"
+        ],
+        "properties": {
+          "artifact_id": { "type": "string", "minLength": 1 },
+          "fingerprint": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+          "family": { "type": "string", "minLength": 1 },
+          "title": { "type": "string", "minLength": 1 },
+          "observation_class": {
+            "enum": [
+              "boundary_trace",
+              "boundary_behavior",
+              "baseline_differential",
+              "runtime_diagnostic",
+              "instrumentation_diagnostic"
+            ]
+          },
+          "outcome": { "type": "string", "minLength": 1 },
+          "actors": {
+            "type": "array", "items": { "type": "string" }, "uniqueItems": true
+          },
+          "resources": {
+            "type": "array", "items": { "type": "string" }, "uniqueItems": true
+          },
+          "evidence_events": {
+            "type": "array",
+            "items": { "type": "integer", "minimum": 0 },
+            "uniqueItems": true
+          },
+          "causal_signature": {
+            "type": "array", "items": { "type": "string" }
+          },
+          "boundary_phases": {
+            "type": "array", "items": { "type": "string" }, "uniqueItems": true
+          },
+          "boundary_depth": { "type": "integer", "minimum": 0 },
+          "evidence_quality": { "type": "number", "minimum": 0, "maximum": 1 },
+          "execution_complete": { "type": "boolean" },
+          "observations": { "type": "object" }
+        },
+        "additionalProperties": false
+      }
+    }
+  },
+  "additionalProperties": false
+}

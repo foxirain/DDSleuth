@@ -12,7 +12,7 @@ One trial is the tuple of:
 - implementation name, version, and executable digest;
 - generated identity and policy artifact digests;
 - matrix assignments;
-- trajectory selection rank and cumulative runtime coverage when guidance is enabled;
+- trajectory selection rank and cumulative runtime artifact coverage when guidance is enabled;
 - repetition index;
 - normalized evidence bundle and oracle report.
 
@@ -34,15 +34,14 @@ transport-fault acknowledgement, or `not_applicable` assertion makes the trial
 inconclusive. Infrastructure errors remain separate from semantic outcomes. Capability
 claims require their own events; possession of a token is not by itself proof of
 decryption, forgery, application delivery, or availability impact. Sanitizer-confirmed
-OOB, UAF, double-free, and related native failures are retained as memory-safety
-candidates even though the trial verdict is necessarily inconclusive; remote
-reachability and exploitability still require separate evidence.
+native failures are retained as runtime diagnostic artifacts even though the trial
+verdict is necessarily inconclusive.
 
-An inconclusive trial may still contain a discovery candidate. Candidate extraction
-operates on the preserved prefix of the runtime trace, records `execution_complete`,
-and lowers confidence when later execution diverges. This does not convert an
-incomplete trial into a vulnerability verdict; it prevents an earlier security signal
-from being discarded by a subsequent barrier or process failure.
+An inconclusive trial may still contain a runtime artifact. Artifact extraction
+operates on the preserved prefix, records `execution_complete`, and exports the exact
+causal slice. This does not convert an incomplete trial into a vulnerability verdict;
+it prevents an earlier observation from being discarded by a later barrier or process
+failure.
 
 ## Repetition and nondeterminism
 
@@ -95,12 +94,13 @@ identifiers are prohibited; equality is tested with an ephemeral per-run HMAC se
 
 ## Benchmark design
 
-The benchmark corpus should contain four classes:
+The benchmark corpus should contain five classes:
 
 - fixed, publicly disclosed implementation vulnerabilities;
 - synthetic seeded violations with one known invariant break each;
 - benign edge cases that previously caused false positives;
 - current implementation baselines with no presumed vulnerability.
+- unlabeled trajectory campaigns used to measure genuinely new artifact discovery.
 
 Embargoed findings remain outside the public tree. They may be used in a private
 evaluation only if their result is reported in aggregate until coordinated disclosure
@@ -108,22 +108,25 @@ permits release.
 
 ## Baselines and metrics
 
-The research evaluation compares the framework with a static-analysis baseline and a
-packet-fuzzing baseline under equal wall-clock and compute budgets. Report at least:
+The research evaluation compares the framework with seeded-random scheduling, a
+static-analysis baseline, and a packet-fuzzing baseline under equal wall-clock and
+compute budgets. Report at least:
 
-- validated invariant violations found;
-- false positives on benign cases;
-- inconclusive rate;
-- time to first validated violation;
-- scenario executions per hour;
-- reproduction rate across clean runs;
-- minimization ratio from discovering matrix case to final reproducer;
-- implementation-specific code required outside the shared event/oracle core.
-- candidate precision after manual validation;
-- fraction of candidates that appear only under schedule mutation;
-- validated High/Critical yield per execution-hour.
-- runtime semantic states/transitions covered per execution;
-- guided-versus-seeded-random coverage and candidate yield under the same budget.
+- unique artifact clusters per execution-hour;
+- time to first mutation-only artifact;
+- novelty and exact-trajectory reproducibility as separate distributions;
+- semantic prevalence and schedule sensitivity;
+- baseline differential precision after manual classification;
+- median causal-slice reduction relative to the complete trace;
+- instrumentation-divergence and inconclusive rates;
+- runtime states, transitions, motifs, and boundary phases covered per execution;
+- artifact-guided versus seeded-random yield under the same budget;
+- cluster stability across independent scheduler seeds;
+- implementation-specific code required outside the shared event/artifact core.
+
+Validated vulnerabilities may be reported as a downstream outcome, but vulnerability
+yield is not an artifact-engine label and must not train the scheduler into asserting
+severity.
 
 The primary claim is cross-layer detection, not raw crash count. A crash is counted as
 a security result only after its trust boundary and attacker-controlled input are

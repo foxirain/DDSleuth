@@ -1,6 +1,8 @@
 # Normalized event model
 
-Adapters translate implementation-specific observations into events. Oracles consume only this model and the scenario; they must not parse vendor logs or inspect vendor-private objects.
+Adapters translate implementation-specific observations into events. Artifact
+extraction and optional compatibility oracles consume only this model and the
+scenario; they must not parse vendor logs or inspect vendor-private objects.
 
 ## Event envelope
 
@@ -126,8 +128,8 @@ receivers and `material_semantics=recipient_specific` for pair-specific origin
 authentication material. Recipient-scope comparison ignores the common component.
 For received user-endpoint material, token direction determines the required local
 authority: a `datawriter` token is consumed by a subscriber, while a `datareader`
-token is consumed by a publisher. Candidate extraction applies `subscribe` and
-`publish` policy checks respectively; receiving a remote reader token is not, by
+token is consumed by a publisher. Optional invariant evaluation applies `subscribe`
+and `publish` policy checks respectively; receiving a remote reader token is not, by
 itself, evidence that a writer gained read access.
 
 `application.write_attempt` and `application.sample_written` are deliberately distinct.
@@ -147,7 +149,7 @@ the matching applied-fault event.
 
 `credential.revoked` distinguishes `local_identity=true` from a remote invalidation.
 Fast DDS may emit the same semantic transition at both the white-box boundary and the
-public participant listener; candidate logic treats the event as a boundary, not a
+public participant listener; artifact logic treats the event as a boundary, not a
 counter. `key.rotated` with `rotation_kind=participant_master_key` is emitted only
 after the crypto plugin successfully regenerates the remaining participant's key in
 response to remote revocation.
@@ -158,3 +160,11 @@ capture records an action id, and replay adds `source_action_id` so evidence bin
 resent bytes to that stored wire image rather than an unrelated later control packet.
 The runner requires every requested mutation to produce its correlated applied event;
 absence or a failed outcome makes the trial inconclusive.
+
+## Artifact projection
+
+Artifact identity uses only semantic event fields. GUIDs, timestamps, packet lengths,
+payloads, and key fingerprints remain available in evidence for correlation but are
+excluded from cross-run fingerprints. Actor-local three-event motifs preserve temporal
+shape without treating cross-process log adjacency as causality. See
+`ARTIFACT_MODEL.md` for slicing and differential rules.

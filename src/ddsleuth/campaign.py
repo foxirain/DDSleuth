@@ -10,8 +10,8 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from .adapters.fastdds import FastDDSAdapter
+from .artifacts import discover_artifacts, write_artifacts
 from .campaign_types import ManifestCase
-from .candidates import discover_candidates, write_candidates
 from .evidence import load_evidence, write_evidence
 from .identity import IdentityArtifacts, materialize_identities
 from .models import JsonValue, Scenario
@@ -119,6 +119,82 @@ def _require_string(value: Any, context: str) -> str:
     if not isinstance(value, str) or not value:
         raise CampaignError(f"{context} must be a non-empty string")
     return value
+
+
+def load_campaign_report(path: str | Path) -> CampaignReport:
+    """Load a persisted campaign for deterministic offline artifact analysis."""
+
+    report_path = Path(path)
+    raw = json.loads(report_path.read_text(encoding="utf-8"))
+    if not isinstance(raw, Mapping):
+        raise CampaignError("campaign report root must be an object")
+    cases_raw = raw.get("cases")
+    if not isinstance(cases_raw, list):
+        raise CampaignError("campaign report cases must be an array")
+    cases: list[CampaignCaseResult] = []
+    for position, item in enumerate(cases_raw):
+        if not isinstance(item, Mapping):
+            raise CampaignError(f"campaign case {position} must be an object")
+        failed_raw = item.get("failed_processes", {})
+        assignments = item.get("assignments", {})
+        capabilities = item.get("capabilities", {})
+        incomplete = item.get("incomplete_processes", [])
+        if not isinstance(failed_raw, Mapping) or not isinstance(assignments, Mapping):
+            raise CampaignError(f"campaign case {position} has invalid mappings")
+        if not isinstance(capabilities, Mapping) or not isinstance(incomplete, list):
+            raise CampaignError(f"campaign case {position} has invalid result fields")
+        error_raw = item.get("error")
+        if error_raw is not None and not isinstance(error_raw, Mapping):
+            raise CampaignError(f"campaign case {position} error must be an object")
+        cases.append(
+            CampaignCaseResult(
+                index=int(item.get("index", -1)),
+                repetition=int(item.get("repetition", 0)),
+                scenario_id=_require_string(item.get("scenario_id"), "scenario_id"),
+                scenario_digest=_require_string(
+                    item.get("scenario_digest"), "scenario_digest"
+                ),
+                assignments=dict(assignments),
+                status=_require_string(item.get("status"), "status"),
+                verdict=_require_string(item.get("verdict"), "verdict"),
+                run_dir=_require_string(item.get("run_dir"), "run_dir"),
+                violations=int(item.get("violations", 0)),
+                failed_processes={str(key): int(value) for key, value in failed_raw.items()},
+                incomplete_processes=tuple(str(value) for value in incomplete),
+                capabilities={str(key): str(value) for key, value in capabilities.items()},
+                resumed=bool(item.get("resumed", False)),
+                duration_seconds=float(item.get("duration_seconds", 0.0)),
+                configuration_binding=_require_string(
+                    item.get("configuration_binding", "unknown"),
+                    "configuration_binding",
+                ),
+                error=(
+                    {str(key): str(value) for key, value in error_raw.items()}
+                    if error_raw is not None
+                    else None
+                ),
+            )
+        )
+    counts = raw.get("counts", {})
+    summaries = raw.get("scenario_summaries", [])
+    selection = raw.get("selection")
+    if not isinstance(counts, Mapping) or not isinstance(summaries, list):
+        raise CampaignError("campaign report counts or scenario_summaries are invalid")
+    if selection is not None and not isinstance(selection, Mapping):
+        raise CampaignError("campaign report selection must be an object")
+    return CampaignReport(
+        schema_version=int(raw.get("schema_version", 0)),
+        manifest_digest=_require_string(raw.get("manifest_digest"), "manifest_digest"),
+        case_count=int(raw.get("case_count", 0)),
+        repetitions=int(raw.get("repetitions", 0)),
+        trial_count=int(raw.get("trial_count", 0)),
+        counts={str(key): int(value) for key, value in counts.items()},
+        cases=tuple(cases),
+        scenario_summaries=tuple(
+            dict(value) for value in summaries if isinstance(value, Mapping)
+        ),
+        selection=dict(selection) if selection is not None else None,
+    )
 
 
 def _safe_child(root: Path, relative: str, context: str) -> Path:
@@ -501,8 +577,11 @@ def run_campaign(
     if plateau_window < 0:
         raise CampaignError("plateau window must be non-negative")
     manifest_digest, cases = load_manifest(manifest_path)
-    if selection_strategy not in ("manifest", "coverage-guided"):
-        raise CampaignError("selection strategy must be manifest or coverage-guided")
+    if selection_strategy not in ("manifest", "artifact-guided", "coverage-guided"):
+        raise CampaignError(
+            "selection strategy must be manifest or artifact-guided "
+            "(coverage-guided is a compatibility alias)"
+        )
     if execution_budget is None:
         execution_budget = len(cases)
     if execution_budget <= 0 or execution_budget > len(cases):
@@ -519,10 +598,10 @@ def run_campaign(
     scheduler = None
     pending = list(cases)
     selected_cases: list[ManifestCase] = []
-    if selection_strategy == "coverage-guided":
-        from .coverage import CoverageGuidedScheduler
+    if selection_strategy in ("artifact-guided", "coverage-guided"):
+        from .coverage import ArtifactGuidedScheduler
 
-        scheduler = CoverageGuidedScheduler(cases, seed=selection_seed)
+        scheduler = ArtifactGuidedScheduler(cases, seed=selection_seed)
 
     while pending and len(selected_cases) < execution_budget:
         case = scheduler.choose(pending) if scheduler is not None else pending[0]
@@ -565,9 +644,9 @@ def run_campaign(
                         )
                     report = evaluate(scenario, evidence)
                     write_report(report, report_path)
-                    write_candidates(
-                        discover_candidates(scenario, evidence, report),
-                        run_dir / "candidates.json",
+                    write_artifacts(
+                        discover_artifacts(scenario, evidence),
+                        run_dir / "artifacts.json",
                     )
                     result = _result_from_report(
                         case,
@@ -655,9 +734,9 @@ def run_campaign(
                     write_evidence(evidence, evidence_path)
                     report = evaluate(scenario, evidence)
                     write_report(report, report_path)
-                    write_candidates(
-                        discover_candidates(scenario, evidence, report),
-                        run_dir / "candidates.json",
+                    write_artifacts(
+                        discover_artifacts(scenario, evidence),
+                        run_dir / "artifacts.json",
                     )
                     result = _result_from_report(
                         case,

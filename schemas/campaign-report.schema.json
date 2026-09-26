@@ -73,7 +73,7 @@
         "consecutive_no_progress_runs", "selection_trace"
       ],
       "properties": {
-        "strategy": { "const": "causal-security-coverage-guided" },
+        "strategy": { "const": "runtime-artifact-guided" },
         "seed": { "type": "integer" },
         "pool_size": { "type": "integer", "minimum": 1 },
         "execution_budget": { "type": "integer", "minimum": 1 },

@@ -6,11 +6,11 @@
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.11%2B-blue.svg)](pyproject.toml)
 
-DDSleuth is an experimental, runtime-first framework for discovering security faults
-that emerge across DDS protocol state, participant order, endpoint lifecycle,
-authorization, key distribution, and application-visible delivery. It explores
-distributed execution trajectories and ranks anomalous traces for later human or LLM
-investigation.
+DDSleuth is an experimental, runtime-first framework for discovering behavioral
+artifacts that emerge across DDS protocol state, participant order, endpoint
+lifecycle, authorization, key distribution, transport mutation, and
+application-visible delivery. It explores distributed execution trajectories and
+exports compact causal observations for later human or model-assisted investigation.
 
 > **Alpha status:** DDSleuth is a research instrument, not a production security
 > control. Its checked-in scenarios are designed for authorized, isolated test
@@ -19,7 +19,7 @@ investigation.
 The project starts with Fast DDS because its reference experiments cross the entire
 runtime path from signed Governance and Permissions documents through CryptoToken
 delivery, protected RTPS traffic, and a real application `DataReader`. The trajectory,
-event, semantic, and candidate models are vendor-neutral; implementation-specific
+event, semantic, and artifact models are vendor-neutral; implementation-specific
 observation belongs behind adapters.
 
 ## What this project discovers
@@ -36,9 +36,9 @@ exist only across processes and protocol phases:
 - the same semantic experiment must not change security behavior solely because join
   order, delay, reconnect, revocation, or lifecycle interleaving changed.
 
-DDSleuth stops at a ranked, replayable runtime candidate. Exploit construction,
-source-to-sink proof, RCE development, and advisory writing are deliberately outside
-the core; a researcher or LLM can perform those tasks after discovery.
+DDSleuth stops at a ranked, replayable runtime artifact. It does not label an artifact
+as a vulnerability or assign severity. Source tracing, exploitability analysis, PoC
+development, and advisory writing are deliberately downstream research tasks.
 
 ## Current milestone
 
@@ -47,24 +47,25 @@ identity generation, signed Governance and Permissions generation, structured na
 events, event-driven process barriers, run-local key fingerprints, fail-closed
 invariant evaluation, Cartesian and pairwise matrices, resumable repeated campaigns,
 configuration and executable provenance, reliability summaries, stateful trajectory
-generation, partial-trace preservation, semantic candidate extraction, and
-schedule-sensitive candidate clustering. A vendor-neutral timed action-plan model
+generation, partial-trace preservation, causal artifact extraction, baseline
+differentials, and schedule-sensitive artifact clustering. A vendor-neutral timed action-plan model
 now drives endpoint and participant lifecycles, real certificate-expiry revocation,
 and loopback transport faults. The Fast DDS probe can disconnect and recreate a
 secure participant in-process; the revision-pinned observer records the resulting
 remote revoke and participant master-key regeneration. A separate loopback-only
 shim can drop, delay, duplicate, or replay the exact UDP wire datagram. Exploration
-selects from a larger trajectory pool using runtime semantic-state and transition
-novelty rather than truncating a precomputed matrix. The legacy
+selects from a larger trajectory pool using semantic states, actor-local causal
+motifs, boundary depth, and runtime novelty rather than truncating a precomputed
+matrix. The legacy
 three-party Fast DDS harness remains a private golden regression case; no
 finding-specific trigger or unpatched exploit module is embedded in the public core.
 
-Implemented invariant families cover token-recipient binding, exact outbound/inbound
+The compatibility invariant evaluator covers token-recipient binding, exact outbound/inbound
 token-route consistency, authorization isolation, policy overgrant, key-scope
 separation, endpoint key freshness after destruction/recreation, post-revocation
 authority reuse, session-key rotation delivery, observer health, and
 application-visible writer impersonation.
-Capability scoring is kept separate from root-cause classification. Common sender key
+It is not used to assign severity to discovery artifacts. Common sender key
 material and recipient-specific key material are fingerprinted independently so
 legitimate multi-recipient key sharing is not promoted into a false finding.
 
@@ -81,6 +82,26 @@ python -m pip install --editable .
 ddsleuth --version
 ddsleuth validate examples/fastdds/three_party_recipient_binding.json
 ./scripts/test.sh
+```
+
+Artifact extraction is independent of vulnerability evaluation:
+
+```sh
+ddsleuth extract-artifacts scenario.json run/evidence.json \
+  --output run/artifacts.json
+```
+
+The optional `evaluate` command remains for invariant-regression experiments and
+backward compatibility. It is not part of artifact severity or exploitability
+analysis.
+
+Existing campaigns can be reanalyzed without rerunning Fast DDS:
+
+```sh
+ddsleuth analyze-exploration trajectories/manifest.json \
+  --run-root runs \
+  --campaign-report runs/campaign-report.json \
+  --output artifact-exploration-report.json
 ```
 
 Generate unsigned Governance and Permissions documents from a scenario:
@@ -161,7 +182,7 @@ ddsleuth explore \
   --materialize-identities \
   --budget 24 \
   --pool-size 96 \
-  --strategy coverage-guided \
+  --strategy artifact-guided \
   --spacing-ms 0 \
   --spacing-ms 25 \
   --spacing-ms 250 \
@@ -174,23 +195,30 @@ ddsleuth explore \
 orders and spacings. One zero-offset, barrier-preserving baseline is always retained,
 even when only relaxed mutations or nonzero spacings are requested; the remaining
 pool is selected deterministically from the configured seed. In the default
-`coverage-guided` strategy, the baseline executes first. Each completed trace is
-normalized into protocol states, actor-local transitions, explicit causal edges, and
-security milestones; GUIDs, timestamps, key fingerprints, and byte counts are
-excluded. Cross-process log adjacency is never treated as protocol causality. Static
-schedule features that produced new weighted runtime coverage receive energy when the
-next pending trajectory is chosen. `--plateau-window` stops a campaign after repeated
-zero-novelty trajectories (20 by default; 0 disables it). The
-`--budget` limits executions while `--pool-size` controls the candidate pool (default
-four times the budget). `--action-jitter-ms` adds stable per-action early/late timing
-mutations without reordering a plan. Every trial writes
-`evidence.json`, `report.json`, and `candidates.json`. The top-level
-`exploration-report.json` clusters stable semantic fingerprints, reports occurrence
-rates, and marks candidates that exist only under a mutated schedule. A later barrier
-failure or role exit does not erase an earlier security divergence.
-ASan, UBSan memory diagnostics, TSan, and MSan output are normalized into
-`memory_safety.violation` events; a sanitizer-confirmed native failure remains a High
-lead even though the crashing process cannot complete normally.
+`artifact-guided` strategy, the baseline executes first. Each completed trace is
+normalized into protocol states, actor-local transitions and three-event motifs,
+explicit causal edges, boundary milestones, and diagnostics; GUIDs, timestamps, raw
+key fingerprints, and application payloads are excluded from identity. Cross-process
+log adjacency is never treated as protocol causality. Static schedule features that
+produce new motifs, deeper boundary composition, or new differential behavior receive
+energy when the next trajectory is selected. `--plateau-window` stops a campaign after
+repeated zero-novelty trajectories (20 by default; 0 disables it). The `--budget`
+limits executions while `--pool-size` controls the trajectory pool (default four times
+the budget). `--action-jitter-ms` adds stable per-action timing mutations without
+reordering a plan. Every trial writes `evidence.json`, `report.json`, and
+`artifacts.json`; mutated trials also receive `differential-artifacts.json` when their
+stable behavior projection differs from the baseline. The top-level
+`exploration-report.json` keeps novelty, reproducibility, semantic prevalence,
+baseline divergence, boundary depth, and evidence quality as separate dimensions.
+`research_priority` orders review work only; it is not severity.
+
+ASan, UBSan, TSan, and MSan output is normalized into `memory_safety.violation`
+events and retained as a runtime diagnostic artifact even when the process cannot
+complete normally. DDSleuth records the diagnostic and its preceding causal slice;
+downstream analysis decides what it means.
+
+The formal artifact fields, causal-slicing rules, ranking dimensions, and research
+evaluation metrics are specified in [`docs/ARTIFACT_MODEL.md`](docs/ARTIFACT_MODEL.md).
 
 Large structured-mode logs are compacted after event ingestion: the readable `.log`
 keeps every `DDSLEUTH_EVENT` and bounded diagnostic head/tail sections, while the
@@ -257,7 +285,7 @@ ddsleuth run \
 ```
 
 The run directory contains per-role logs, `evidence.json`, `report.json`, and
-`candidates.json`.
+`artifacts.json`.
 
 The public native probe under `probes/fastdds_native/` provides a non-exploit secure
 reader/writer driver. It consumes generated identities and policies, emits structured
