@@ -947,6 +947,11 @@ int run_scripted_writer(
         emit_action_event(sink, arguments, action, "action.started", "started");
         if (action.operation == "endpoint.create")
         {
+            if (participant == nullptr || publisher == nullptr || topic == nullptr)
+            {
+                throw std::runtime_error(
+                          "cannot create a writer while its participant is disconnected");
+            }
             if (writer != nullptr)
             {
                 throw std::runtime_error("cannot create a writer while one is active");
@@ -1032,6 +1037,10 @@ int run_scripted_writer(
         }
         else if (action.operation == "participant.disconnect")
         {
+            if (participant == nullptr)
+            {
+                throw std::runtime_error("cannot disconnect an inactive participant");
+            }
             if (writer != nullptr)
             {
                 throw std::runtime_error(
@@ -1141,6 +1150,11 @@ int run_scripted_reader(
         emit_action_event(sink, arguments, action, "action.started", "started");
         if (action.operation == "endpoint.create")
         {
+            if (participant == nullptr || subscriber == nullptr || topic == nullptr)
+            {
+                throw std::runtime_error(
+                          "cannot create a reader while its participant is disconnected");
+            }
             if (reader != nullptr)
             {
                 throw std::runtime_error("cannot create a reader while one is active");
@@ -1218,6 +1232,10 @@ int run_scripted_reader(
         }
         else if (action.operation == "participant.disconnect")
         {
+            if (participant == nullptr)
+            {
+                throw std::runtime_error("cannot disconnect an inactive participant");
+            }
             if (reader != nullptr)
             {
                 throw std::runtime_error(

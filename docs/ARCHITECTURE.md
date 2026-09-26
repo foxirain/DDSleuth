@@ -46,6 +46,14 @@ the baseline causal barriers. `relaxed` schedules deliberately remove them and e
 join/order races. The generator always retains a baseline and uses a deterministic seed
 to select the remaining schedules under a fixed execution budget.
 
+Default exploration also infers minimal action-order crossings around credential,
+key, participant, endpoint, and transport operations. Each mutation moves one
+boundary action across one adjacent action while preserving the original time
+envelope. These cases change an actual happens-before edge; they are isolated rather
+than multiplied by the broad timing grid, and the scheduler prioritizes them over
+clock-only jitter. Causally invalid plans fail an explicit probe precondition and are
+kept as incomplete diagnostics, never promoted into semantic targets.
+
 The artifact-guided scheduler executes a replicated causal baseline first and then
 immediately uses feedback. It extracts semantic states, shared-identifier partial-order
 edges, boundary milestones, semantic artifact fingerprints, and runtime diagnostics
@@ -64,6 +72,14 @@ cross-run corpus carries semantic feature coverage and scheduler rewards into la
 campaigns. Corpus keys are domain-separated SHA-256 identifiers; assignment values,
 payloads, key fingerprints, and raw feature strings are not persisted. This is runtime protocol
 coverage, not compiler source-line coverage.
+
+Matched controls serve two projections. The partial-order projection detects runtime
+structure changes after suppressing control noise. The semantic projection detects
+added outcomes and stable control outcomes that disappear or are replaced under a
+mutation. The latter become first-class `semantic_outcome_transition` artifacts and
+receive the scheduler's highest non-diagnostic reward. Direct artifacts and matched
+transitions that encode the same outcome change share a target group, preventing one
+causal effect from being counted twice in the downstream research queue.
 
 Matrix dimensions remain useful for semantic controls, but they are inputs to the
 trajectory generator rather than the primary abstraction. Dotted paths can address

@@ -5,10 +5,13 @@ import unittest
 from pathlib import Path
 
 from ddsleuth.artifacts import (
+    artifact_class,
     behavior_projection,
     discover_artifacts,
     discover_differential_artifacts,
     discover_matched_differential_artifacts,
+    discover_matched_semantic_differential_artifacts,
+    is_semantic_artifact,
 )
 from ddsleuth.evidence import EvidenceBundle
 from ddsleuth.models import EvidenceEvent, EventKind
@@ -159,6 +162,26 @@ class RuntimeArtifactTests(unittest.TestCase):
         self.assertNotIn("secret-before", rendered)
         self.assertNotIn("secret-after", rendered)
 
+    def test_runtime_memory_failure_is_diagnostic_not_semantic(self) -> None:
+        scenario, evidence = self._bundle(
+            [
+                self._event(
+                    EventKind.MEMORY_SAFETY_VIOLATION,
+                    "alice",
+                    "detected",
+                    sanitizer="address",
+                    violation="heap_buffer_overflow",
+                )
+            ]
+        )
+        artifact = next(
+            item
+            for item in discover_artifacts(scenario, evidence).artifacts
+            if item.family == "runtime_memory_diagnostic"
+        )
+        self.assertEqual("diagnostic", artifact_class(artifact))
+        self.assertFalse(is_semantic_artifact(artifact))
+
     def test_differential_projection_detects_count_bucket_and_outcome_changes(self) -> None:
         scenario, baseline = self._bundle(
             [
@@ -202,6 +225,57 @@ class RuntimeArtifactTests(unittest.TestCase):
         self.assertEqual("baseline_runtime_divergence", artifact.family)
         self.assertEqual("baseline_differential", artifact.observation_class)
         self.assertGreater(artifact.observations["added_feature_count"], 0)
+        self.assertFalse(is_semantic_artifact(artifact))
+
+    def test_stable_semantic_outcome_removal_is_a_first_class_delta(self) -> None:
+        controls = []
+        scenario = None
+        for index in range(3):
+            scenario, baseline = self._bundle(
+                [
+                    self._event(
+                        EventKind.CREDENTIAL_REVOKED,
+                        "alice",
+                        "revoked",
+                        local_identity=True,
+                    ),
+                    self._event(
+                        EventKind.APPLICATION_SAMPLE_WRITTEN,
+                        "alice",
+                        "succeeded",
+                        topic="SecretTopic",
+                        message="after-revocation",
+                    ),
+                    self._event(
+                        EventKind.APPLICATION_OBSERVATION_WINDOW,
+                        "bob",
+                        "expired",
+                        expected_samples=2,
+                        observed_samples=1,
+                    ),
+                ],
+                run_id=f"control-{index}",
+            )
+            controls.append(baseline)
+        assert scenario is not None
+        _, current = self._bundle([], run_id="mutation")
+        deltas = discover_matched_semantic_differential_artifacts(
+            scenario,
+            controls,
+            scenario,
+            current,
+        )
+        removed = next(
+            item
+            for item in deltas
+            if item.observations["baseline_family"]
+            == "split_enforcement_after_revocation"
+        )
+        self.assertEqual("semantic_outcome_transition", removed.family)
+        self.assertEqual("absent_under_mutation", removed.outcome)
+        self.assertTrue(removed.execution_complete)
+        self.assertTrue(is_semantic_artifact(removed))
+        self.assertEqual(3, removed.observations["baseline_support"])
 
     def test_partial_order_projection_ignores_unrelated_event_interleaving(self) -> None:
         scenario, first = self._bundle(

@@ -30,8 +30,18 @@ An artifact contains:
 
 Observation classes include `boundary_trace`, `boundary_behavior`,
 `boundary_topology`, `boundary_binding`, `boundary_capability`,
-`boundary_cardinality`, `baseline_differential`, `runtime_diagnostic`, and
-`instrumentation_diagnostic`.
+`boundary_cardinality`, `matched_semantic_differential`, `baseline_differential`,
+`runtime_diagnostic`, and `instrumentation_diagnostic`.
+
+Every cluster has one explicit class:
+
+- `semantic`: a protocol, security-state, topology, lifecycle, or application outcome;
+- `context`: a generic boundary episode or partial-order differential used to explain
+  a semantic result;
+- `diagnostic`: instrumentation divergence or sanitizer-confirmed memory failure.
+
+The classes are disjoint. A process failure can therefore remain reviewable without
+inflating semantic discovery counts.
 
 ## Causality
 
@@ -68,6 +78,12 @@ orders collapse to the same projection. At least three matched baseline repetiti
 are used when available; any feature that varies within those controls is classified
 as control noise and removed from mutation deltas.
 
+Replicated controls also define a stable semantic projection. If a causal mutation
+removes a stable artifact or replaces it with another outcome, DDSleuth emits a
+`semantic_outcome_transition`. Added outcomes retain their native artifact family.
+This makes both sides of a state transition observable instead of treating absence as
+an unstructured trace difference.
+
 ## Ranking dimensions
 
 Cluster ranking keeps independent dimensions visible:
@@ -86,9 +102,20 @@ Cluster ranking keeps independent dimensions visible:
 - **evidence quality:** structured-source coverage and execution completeness.
 
 An artifact is `confirmed` only after at least three executions of one exact
-trajectory with at least two reproductions. Generic `boundary_episode` clusters are
-marked `context_only`, capped in review priority, and excluded from semantic novelty
-and mutation-only counts.
+trajectory with at least two reproductions. `confirmed_complete` additionally
+requires the reproductions to come from complete executions. A strict discovery
+target satisfies all of `artifact_class == semantic`, `only_under_mutation`, and
+`confirmed_complete`; it is exported as `target_qualified`. Generic context clusters
+are capped in review priority and excluded from semantic novelty and mutation-only
+counts. Diagnostics retain separate confirmation and mutation-only accounting.
+
+A single effect can have both a direct artifact (for example,
+`delivery_cardinality=exact`) and a matched-control transition (for example,
+`delivery_cardinality: missing -> exact`). Qualified clusters therefore carry a
+`target_group_id` and a `target_role`. The transition is the primary view and the
+direct artifact is supporting evidence. `confirmed_mutation_only_semantic_groups`
+is the de-duplicated research-queue size; the cluster count remains available for
+auditing every representation.
 
 `research_priority` is a bounded weighted summary used only to order review. It must
 not be converted into CVSS, exploitability, or a vulnerability label. Downstream human

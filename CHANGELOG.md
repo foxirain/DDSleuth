@@ -4,7 +4,37 @@ All notable changes are recorded here. Versions follow Semantic Versioning, with
 Python pre-release spelling used for packages (`0.1.0a1`) and a human-readable Git tag
 (`v0.1.0-alpha.1`).
 
-## 0.3.0-alpha.1 — Unreleased
+## 0.4.0-alpha.1 — Unreleased
+
+### Changed
+
+- make adjacent action-order crossings around credential, key, participant,
+  endpoint, and transport boundaries part of the default trajectory pool;
+- prioritize causal state-transition mutations over broad clock jitter and feed
+  matched-control semantic deltas directly into scheduler reward;
+- represent removal or replacement of a stable control outcome as a first-class
+  `semantic_outcome_transition` artifact;
+- require complete executions for strict mutation-only semantic qualification while
+  retaining incomplete observations as diagnostics;
+- classify semantic, context, and diagnostic clusters independently in exploration
+  report schema v4;
+- use one execution-completeness contract across scheduling, confirmation, and
+  reporting;
+- fail native probe lifecycle preconditions explicitly instead of dereferencing a
+  null publisher or subscriber after a causally invalid reconnect ordering;
+- install the declared setuptools backend and wheel command with release extras so
+  the no-isolation package gate works in a clean Python 3.12 environment.
+
+### Added
+
+- `confirmed_mutation_only_semantic_clusters` as the strict discovery target;
+- de-duplicated target groups that link direct and matched-control views of the same
+  dynamic effect;
+- exact mutation-operator provenance, baseline support, complete-occurrence counts,
+  and diagnostic-only aggregate metrics;
+- `--no-causal-order-mutations` for controlled ablation experiments.
+
+## 0.3.0-alpha.1 — 2026-09-26
 
 ### Changed
 

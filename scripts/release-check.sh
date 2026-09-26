@@ -16,8 +16,8 @@ DDSLEUTH_REQUIRE_NATIVE_TESTS=1 "$repo_root/scripts/test.sh"
 "$repo_root/scripts/run-smoke.sh"
 "$python_bin" "$repo_root/scripts/check_release.py"
 
-if ! "$python_bin" -c 'import build, twine' 2>/dev/null; then
-    printf 'release dependencies are missing; install with: python -m pip install ".[release]"\n' >&2
+if ! "$python_bin" -c 'import build, setuptools, twine, wheel' 2>/dev/null; then
+    printf 'release or build-backend dependencies are missing; install with: python -m pip install ".[release]"\n' >&2
     exit 1
 fi
 

@@ -360,6 +360,10 @@ def _semantic_case_key(case: ManifestCase) -> tuple[tuple[str, str], ...]:
 
 
 def _feature_weight(feature: str) -> float:
+    if feature.startswith("artifact:mutation_only_semantic:"):
+        return 64.0
+    if feature.startswith("artifact:matched_differential:"):
+        return 24.0
     if feature.startswith("artifact:runtime_memory_diagnostic:"):
         return 48.0
     if feature.startswith("artifact:"):
@@ -431,6 +435,14 @@ class ArtifactGuidedScheduler:
         init=False,
         default_factory=set,
     )
+    _baseline_artifacts: dict[tuple[tuple[str, str], ...], set[str]] = field(
+        init=False,
+        default_factory=dict,
+    )
+    _baseline_evidence: dict[
+        tuple[tuple[str, str], ...],
+        list[EvidenceBundle],
+    ] = field(init=False, default_factory=dict)
 
     def __post_init__(self) -> None:
         self._static = {case.index: _static_features(case) for case in self.cases}
@@ -484,7 +496,22 @@ class ArtifactGuidedScheduler:
             and case.assignments.get("trajectory.spacing_ms") == 0
             and case.assignments.get("trajectory.action_jitter_ms", 0) == 0
             and case.assignments.get("trajectory.boundary_offset_ms", 0) == 0
+            and "trajectory.causal_mutation" not in case.assignments
         )
+
+    @staticmethod
+    def _mutation_prior(case: ManifestCase) -> float:
+        """Prefer mutations that change a happens-before edge over clock noise."""
+
+        if isinstance(case.assignments.get("trajectory.causal_mutation"), dict):
+            return 12.0
+        if case.assignments.get("trajectory.barrier_mode") == "relaxed":
+            return 5.0
+        if case.assignments.get("trajectory.boundary_offset_ms", 0) != 0:
+            return 2.0
+        if case.assignments.get("trajectory.action_jitter_ms", 0) != 0:
+            return 1.0
+        return 0.0
 
     def choose(self, pending: Iterable[ManifestCase]) -> ManifestCase:
         choices = tuple(pending)
@@ -526,7 +553,10 @@ class ArtifactGuidedScheduler:
                     exploration += 1.0
             scale = max(1, len(features))
             return (
-                unseen * 2.0 + learned / scale + exploration / scale,
+                unseen * 2.0
+                + learned / scale
+                + exploration / scale
+                + self._mutation_prior(case),
                 unseen,
                 _tie_break(self.seed, case),
             )
@@ -544,6 +574,25 @@ class ArtifactGuidedScheduler:
         artifact_potential = 0.0
         runtime_anomaly = False
         semantic_artifact_count = 0
+        mutation_only_semantic_count = 0
+        matched_differential_count = 0
+        scenario = load_scenario(case.scenario_path)
+        semantic_key = _semantic_case_key(case)
+        baseline_case = self._is_baseline(case)
+        baseline_artifacts = self._baseline_artifacts.get(semantic_key, set())
+        controls = self._baseline_evidence.get(semantic_key, [])
+        observed_baseline_artifacts: set[str] = set()
+        observed_baseline_evidence: list[EvidenceBundle] = []
+        # Local import avoids the module cycle: artifact extraction consumes
+        # the coverage primitives in this module.
+        from .artifacts import (
+            discover_artifacts,
+            discover_matched_differential_artifacts,
+            discover_matched_semantic_differential_artifacts,
+            execution_is_complete,
+            is_semantic_artifact,
+        )
+
         for bundle in evidence:
             coverage = extract_runtime_coverage(bundle)
             state_count += len(coverage.states)
@@ -551,7 +600,7 @@ class ArtifactGuidedScheduler:
             motif_count += len(coverage.motifs)
             milestone_count += len(coverage.milestones)
             anomaly_count += len(coverage.anomalies)
-            if bundle.metadata.get("execution_error") is not None:
+            if not execution_is_complete(scenario, bundle):
                 valid_execution = False
                 continue
             artifact_potential = max(artifact_potential, _artifact_potential(coverage))
@@ -565,16 +614,74 @@ class ArtifactGuidedScheduler:
                 f"partial:{feature}"
                 for feature in partial_order_projection(bundle)
             )
-            # Local import avoids a module cycle: artifact extraction itself
-            # consumes the coverage primitives above.
-            from .artifacts import discover_artifacts
-
-            scenario = load_scenario(case.scenario_path)
             artifacts = discover_artifacts(scenario, bundle).artifacts
-            semantic = [item for item in artifacts if item.family != "boundary_episode"]
+            semantic = [
+                item
+                for item in artifacts
+                if item.execution_complete and is_semantic_artifact(item)
+            ]
             semantic_artifact_count += len(semantic)
             combined.update(
                 f"artifact:{item.family}:{item.fingerprint}" for item in semantic
+            )
+            if baseline_case:
+                observed_baseline_artifacts.update(item.fingerprint for item in semantic)
+                observed_baseline_evidence.append(bundle)
+            elif controls:
+                mutation_only = [
+                    item for item in semantic if item.fingerprint not in baseline_artifacts
+                ]
+                semantic_differences = (
+                    discover_matched_semantic_differential_artifacts(
+                        scenario,
+                        controls,
+                        scenario,
+                        bundle,
+                    )
+                )
+                represented_replacements = {
+                    (
+                        item.observations.get("baseline_family"),
+                        outcome.strip(),
+                    )
+                    for item in semantic_differences
+                    for outcome in str(
+                        item.observations.get("mutation_outcome", "")
+                    ).split(",")
+                    if outcome.strip() and outcome.strip() != "absent"
+                }
+                canonical_mutation_only = [
+                    item
+                    for item in mutation_only
+                    if (item.family, item.outcome) not in represented_replacements
+                ]
+                mutation_only_semantic_count += (
+                    len(canonical_mutation_only) + len(semantic_differences)
+                )
+                combined.update(
+                    f"artifact:mutation_only_semantic:{item.family}:{item.fingerprint}"
+                    for item in (*canonical_mutation_only, *semantic_differences)
+                )
+                differences = discover_matched_differential_artifacts(
+                    scenario,
+                    controls,
+                    scenario,
+                    bundle,
+                )
+                complete_differences = [
+                    item for item in differences if item.execution_complete
+                ]
+                matched_differential_count += len(complete_differences)
+                combined.update(
+                    f"artifact:matched_differential:{item.fingerprint}"
+                    for item in complete_differences
+                )
+        if baseline_case and observed_baseline_evidence:
+            self._baseline_artifacts.setdefault(semantic_key, set()).update(
+                observed_baseline_artifacts
+            )
+            self._baseline_evidence.setdefault(semantic_key, []).extend(
+                observed_baseline_evidence
             )
         new_runtime_features = {
             feature
@@ -615,6 +722,8 @@ class ArtifactGuidedScheduler:
                 "runtime_milestone_count": milestone_count,
                 "runtime_anomaly_count": anomaly_count,
                 "semantic_artifact_count": semantic_artifact_count,
+                "mutation_only_semantic_artifact_count": mutation_only_semantic_count,
+                "matched_differential_artifact_count": matched_differential_count,
                 "valid_execution": valid_execution,
                 "new_runtime_features": len(new_runtime),
                 "novelty_reward": round(novelty_reward, 3),
@@ -643,6 +752,14 @@ class ArtifactGuidedScheduler:
             "covered_runtime_features": len(self._seen_runtime),
             "corpus_runtime_features": self._initial_runtime_features,
             "new_runtime_features": len(self._seen_runtime) - self._initial_runtime_features,
+            "mutation_only_semantic_observations": sum(
+                int(item.get("mutation_only_semantic_artifact_count", 0))
+                for item in self._trace
+            ),
+            "matched_differential_observations": sum(
+                int(item.get("matched_differential_artifact_count", 0))
+                for item in self._trace
+            ),
             "consecutive_no_progress_runs": self._no_progress_runs,
             "selection_trace": list(self._trace),
         }

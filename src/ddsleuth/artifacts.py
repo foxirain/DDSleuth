@@ -42,6 +42,20 @@ _STANDALONE_BOUNDARY_KINDS = {
     EventKind.EXECUTION_DIVERGENCE,
 }
 
+CONTEXT_ONLY_ARTIFACT_FAMILIES = frozenset(
+    {
+        "boundary_episode",
+        "baseline_runtime_divergence",
+    }
+)
+
+DIAGNOSTIC_ARTIFACT_FAMILIES = frozenset(
+    {
+        "instrumentation_divergence",
+        "runtime_memory_diagnostic",
+    }
+)
+
 _PHASE_BY_KIND = {
     EventKind.CREDENTIAL_AUTHENTICATED: "identity",
     EventKind.CREDENTIAL_REVOKED: "identity",
@@ -126,6 +140,32 @@ class RuntimeArtifact:
         }
 
 
+def is_semantic_artifact(artifact: RuntimeArtifact) -> bool:
+    """Return whether an artifact is a domain observation, not trace context.
+
+    Keeping this classification in the artifact model prevents the scheduler,
+    confirmation loop, and aggregate report from disagreeing about whether an
+    instrumentation failure or a generic differential is a semantic result.
+    """
+
+    return (
+        artifact.family not in CONTEXT_ONLY_ARTIFACT_FAMILIES
+        and artifact.family not in DIAGNOSTIC_ARTIFACT_FAMILIES
+    )
+
+
+def is_diagnostic_artifact(artifact: RuntimeArtifact) -> bool:
+    return artifact.family in DIAGNOSTIC_ARTIFACT_FAMILIES
+
+
+def artifact_class(artifact: RuntimeArtifact) -> str:
+    if is_diagnostic_artifact(artifact):
+        return "diagnostic"
+    if artifact.family in CONTEXT_ONLY_ARTIFACT_FAMILIES:
+        return "context"
+    return "semantic"
+
+
 @dataclass(frozen=True, slots=True)
 class ArtifactBundle:
     schema_version: int
@@ -185,6 +225,12 @@ def _execution_complete(scenario: Scenario, evidence: EvidenceBundle) -> bool:
         if event.kind == EventKind.PROCESS_EXIT and event.outcome == "succeeded"
     }
     return expected <= exited
+
+
+def execution_is_complete(scenario: Scenario, evidence: EvidenceBundle) -> bool:
+    """Expose the single completeness contract to schedulers and reporters."""
+
+    return _execution_complete(scenario, evidence)
 
 
 def _phases(events: Iterable[EvidenceEvent]) -> tuple[str, ...]:
@@ -936,6 +982,124 @@ def discover_artifacts(
         run_id=evidence.run_id,
         artifacts=ordered,
     )
+
+
+def discover_matched_semantic_differential_artifacts(
+    baseline_scenario: Scenario,
+    baselines: Iterable[EvidenceBundle],
+    current_scenario: Scenario,
+    current: EvidenceBundle,
+) -> tuple[RuntimeArtifact, ...]:
+    """Describe stable semantic control outcomes removed by a mutation.
+
+    Added outcomes are already represented by their native artifact family.
+    This complementary projection makes disappearance and replacement first-
+    class results instead of burying them in a generic trace differential.
+    """
+
+    baseline_bundles = tuple(baselines)
+    if not baseline_bundles or not _execution_complete(current_scenario, current):
+        return ()
+    baseline_artifacts: list[tuple[RuntimeArtifact, ...]] = []
+    for bundle in baseline_bundles:
+        if not _execution_complete(baseline_scenario, bundle):
+            continue
+        baseline_artifacts.append(
+            tuple(
+                artifact
+                for artifact in discover_artifacts(baseline_scenario, bundle).artifacts
+                if artifact.execution_complete and is_semantic_artifact(artifact)
+            )
+        )
+    if not baseline_artifacts:
+        return ()
+
+    support = Counter(
+        artifact.fingerprint
+        for artifacts in baseline_artifacts
+        for artifact in artifacts
+    )
+    exemplars = {
+        artifact.fingerprint: artifact
+        for artifacts in baseline_artifacts
+        for artifact in artifacts
+    }
+    stable_threshold = len(baseline_artifacts) // 2 + 1
+    stable = {
+        fingerprint
+        for fingerprint, count in support.items()
+        if count >= stable_threshold
+    }
+    current_semantic = tuple(
+        artifact
+        for artifact in discover_artifacts(current_scenario, current).artifacts
+        if artifact.execution_complete and is_semantic_artifact(artifact)
+    )
+    current_fingerprints = {artifact.fingerprint for artifact in current_semantic}
+    removed = sorted(stable - current_fingerprints)
+    if not removed:
+        return ()
+
+    indexed = [(_sequence(event, index), event) for index, event in enumerate(current.events)]
+    discovered: list[RuntimeArtifact] = []
+    for fingerprint in removed:
+        baseline = exemplars[fingerprint]
+        replacements = sorted(
+            {
+                artifact.outcome
+                for artifact in current_semantic
+                if artifact.family == baseline.family
+            }
+        )
+        mutation_outcome = ",".join(replacements) if replacements else "absent"
+        relevant = [
+            sequence
+            for sequence, event in indexed
+            if event.actor in baseline.actors
+            and (
+                event.kind in _BOUNDARY_KINDS
+                or event.kind
+                in {
+                    EventKind.APPLICATION_SAMPLE_WRITTEN,
+                    EventKind.APPLICATION_SAMPLE_RECEIVED,
+                    EventKind.APPLICATION_OBSERVATION_WINDOW,
+                    EventKind.KEY_MATERIAL_OBSERVED,
+                    EventKind.PROCESS_EXIT,
+                }
+            )
+        ][-12:]
+        discovered.append(
+            _make_artifact(
+                evidence=current,
+                family="semantic_outcome_transition",
+                title="A stable control outcome changed under a causal mutation",
+                observation_class="matched_semantic_differential",
+                outcome=(
+                    "replaced_under_mutation" if replacements else "absent_under_mutation"
+                ),
+                actors=baseline.actors,
+                resources=baseline.resources,
+                seed_events=relevant,
+                execution_complete=True,
+                observations={
+                    "baseline_family": baseline.family,
+                    "baseline_outcome": baseline.outcome,
+                    "mutation_outcome": mutation_outcome,
+                    "baseline_support": support[fingerprint],
+                    "baseline_sample_count": len(baseline_artifacts),
+                    "control_quality": (
+                        "replicated" if len(baseline_artifacts) >= 3 else "limited"
+                    ),
+                },
+                signature=(
+                    f"semantic_delta:{baseline.family}",
+                    f"baseline:{baseline.outcome}",
+                    f"mutation:{mutation_outcome}",
+                ),
+            )
+        )
+    unique = {artifact.fingerprint: artifact for artifact in discovered}
+    return tuple(unique[fingerprint] for fingerprint in sorted(unique))
 
 
 def behavior_projection(evidence: EvidenceBundle) -> Mapping[str, int]:

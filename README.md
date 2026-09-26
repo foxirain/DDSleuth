@@ -56,8 +56,12 @@ remote revoke and participant master-key regeneration. A separate loopback-only
 shim can drop, delay, duplicate, or replay the exact UDP wire datagram. Exploration
 selects from a larger trajectory pool using partial-order causal edges, semantic
 artifact fingerprints, boundary depth, and a persistent cross-run corpus rather than
-truncating a precomputed matrix. Generic boundary episodes remain available as context
-but do not inflate semantic novelty counts. The legacy
+truncating a precomputed matrix. The default pool now includes minimal action-order
+crossings around credential, key, participant, endpoint, and transport boundaries;
+these change happens-before edges instead of merely translating an intact phase in
+time. Replicated controls expose both added outcomes and stable semantic outcomes that
+disappear or are replaced under a mutation. Generic boundary episodes and runtime
+diagnostics remain available without inflating semantic novelty counts. The legacy
 three-party Fast DDS harness remains a private golden regression case; no
 finding-specific trigger or unpatched exploit module is embedded in the public core.
 
@@ -213,15 +217,23 @@ repeated zero-novelty trajectories (20 by default; 0 disables it). The `--budget
 limits executions while `--pool-size` controls the trajectory pool (default four times
 the budget). `--action-jitter-ms` adds stable per-action timing mutations without
 reordering a plan. `--boundary-offset-ms` moves only revoke, rekey, reconnect,
-endpoint-lifecycle, and transport actions around the security boundary. Controls are
-repeated three times by default; a new semantic artifact causes only its exact
+endpoint-lifecycle, and transport actions around the security boundary. By default,
+causal-order mutation also moves one inferred boundary action across an adjacent
+action while preserving the original time envelope; use
+`--no-causal-order-mutations` only for an ablation. The scheduler prioritizes these
+state-transition mutations over clock-only jitter. Controls are repeated three times
+by default; a new semantic artifact causes only its exact
 trajectory to receive two confirmation executions. Every trial writes `evidence.json`, `report.json`, and
 `artifacts.json`; mutated trials also receive `differential-artifacts.json` when their
 stable behavior projection differs from the baseline. The top-level
 `exploration-report.json` keeps novelty, reproducibility, semantic prevalence,
 population support, control noise, baseline divergence, boundary depth, and evidence
-quality as separate dimensions. Context-only and semantic clusters are counted
-separately.
+quality as separate dimensions. Semantic, context, and diagnostic clusters are
+counted separately. `confirmed_mutation_only_semantic_clusters` is the strict target:
+the outcome must be absent from complete controls and reproduced in a complete exact
+mutation trajectory. `confirmed_mutation_only_semantic_groups` de-duplicates direct
+observations and matched-control transitions that describe the same dynamic effect;
+use groups, rather than raw clusters, when sizing the downstream research queue.
 `research_priority` orders review work only; it is not severity.
 
 ASan, UBSan, TSan, and MSan output is normalized into `memory_safety.violation`

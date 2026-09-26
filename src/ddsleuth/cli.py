@@ -287,6 +287,7 @@ def _cmd_explore(args: argparse.Namespace) -> int:
         barrier_modes=args.barrier_mode or ("preserve", "relaxed"),
         action_jitters_ms=args.action_jitter_ms or (0, 10, 50),
         boundary_offsets_ms=args.boundary_offset_ms or (0, -50, -10, 10, 50),
+        causal_order_mutations=args.causal_order_mutations,
         budget=pool_size,
         execution_budget=args.budget,
         seed=args.seed,
@@ -331,8 +332,17 @@ def _cmd_explore(args: argparse.Namespace) -> int:
     print(f"artifact_clusters={exploration['artifact_cluster_count']}")
     print(f"semantic_artifact_clusters={exploration['semantic_artifact_cluster_count']}")
     print(f"context_clusters={exploration['context_cluster_count']}")
+    print(f"diagnostic_clusters={exploration['diagnostic_cluster_count']}")
     print(f"mutation_only_artifacts={exploration['mutation_only_artifact_clusters']}")
     print(f"confirmed_artifacts={exploration['confirmed_artifact_clusters']}")
+    print(
+        "confirmed_mutation_only_semantic_artifacts="
+        f"{exploration['confirmed_mutation_only_semantic_clusters']}"
+    )
+    print(
+        "confirmed_mutation_only_semantic_groups="
+        f"{exploration['confirmed_mutation_only_semantic_groups']}"
+    )
     print(f"report={exploration_path}")
     if campaign.counts["error"]:
         return 3
@@ -547,6 +557,15 @@ def _build_parser() -> argparse.ArgumentParser:
         action="append",
         type=int,
         help="shift only revoke/rekey/reconnect/lifecycle/transport actions",
+    )
+    explore.add_argument(
+        "--causal-order-mutations",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "cross adjacent action-order edges around credential, key, participant, "
+            "endpoint, and transport boundaries (enabled by default)"
+        ),
     )
     explore.add_argument("--dimension", action="append", default=[])
     explore.add_argument(

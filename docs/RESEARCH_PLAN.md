@@ -86,6 +86,10 @@ downstream analysis determines whether an artifact is a vulnerability.
 - Feed minimized scenarios automatically back into the active campaign queue.
 - Learn action-window mutations from observed boundary intervals rather than fixed jitter alone.
 - [x] Add fixed boundary-focused offsets as the precursor to learned action windows.
+- [x] Add minimal adjacent action-order crossings around inferred state boundaries.
+- [x] Detect stable semantic outcomes removed or replaced by a causal mutation.
+- [x] Prioritize causal mutations using matched-control semantic feedback.
+- [x] De-duplicate direct and matched-transition views into causal target groups.
 - [x] Add partial-order reduction for independent actor and callback ordering.
 - Add sequence-aware transport targeting for RTPS submessage classes.
 - [x] Add cross-run semantic-feature persistence and corpus deduplication.

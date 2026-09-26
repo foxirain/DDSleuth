@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 from collections import Counter, defaultdict
@@ -9,8 +10,11 @@ from typing import Any, Mapping
 from .artifacts import (
     ArtifactBundle,
     RuntimeArtifact,
+    artifact_class,
     discover_artifacts,
     discover_matched_differential_artifacts,
+    discover_matched_semantic_differential_artifacts,
+    execution_is_complete,
     write_artifacts,
 )
 from .campaign import CampaignReport, load_manifest
@@ -48,7 +52,31 @@ def _is_baseline(assignments: Mapping[str, JsonValue]) -> bool:
         and assignments.get("trajectory.spacing_ms") == 0
         and assignments.get("trajectory.action_jitter_ms", 0) == 0
         and assignments.get("trajectory.boundary_offset_ms", 0) == 0
+        and "trajectory.causal_mutation" not in assignments
     )
+
+
+def _mutation_operators(assignments: Mapping[str, JsonValue]) -> tuple[str, ...]:
+    operators: list[str] = []
+    causal = assignments.get("trajectory.causal_mutation")
+    if isinstance(causal, Mapping):
+        actor = causal.get("actor", "unknown")
+        action = causal.get("action_id", "unknown")
+        relation = causal.get("relation", "unknown")
+        anchor = causal.get("anchor_action_id", "unknown")
+        operators.append(f"causal:{actor}:{action}:{relation}:{anchor}")
+    if assignments.get("trajectory.barrier_mode") == "relaxed":
+        operators.append("barrier:relaxed")
+    boundary_offset = assignments.get("trajectory.boundary_offset_ms", 0)
+    if isinstance(boundary_offset, (int, float)) and boundary_offset != 0:
+        operators.append(f"boundary-offset:{boundary_offset:g}ms")
+    jitter = assignments.get("trajectory.action_jitter_ms", 0)
+    if isinstance(jitter, (int, float)) and jitter != 0:
+        operators.append(f"action-jitter:{jitter:g}ms")
+    spacing = assignments.get("trajectory.spacing_ms", 0)
+    if isinstance(spacing, (int, float)) and spacing != 0:
+        operators.append(f"role-spacing:{spacing:g}ms")
+    return tuple(operators)
 
 
 def _research_priority(
@@ -80,6 +108,62 @@ def _wilson_lower(successes: int, trials: int, z: float = 1.959963984540054) -> 
         proportion * (1.0 - proportion) / trials + z * z / (4.0 * trials * trials)
     )
     return max(0.0, (center - margin) / denominator)
+
+
+def _target_group_id(fingerprint: str) -> str:
+    digest = hashlib.sha256(fingerprint.encode("utf-8")).hexdigest()[:12]
+    return f"DDSLEUTH-TARGET-{digest}"
+
+
+def _assign_target_groups(clusters: list[dict[str, JsonValue]]) -> None:
+    """Collapse direct and differential views of one effect into one target group."""
+
+    transitions: list[dict[str, JsonValue]] = []
+    for cluster in clusters:
+        cluster["target_group_id"] = None
+        cluster["target_role"] = "not_qualified"
+        if (
+            cluster.get("target_qualified") is True
+            and cluster.get("observation_class") == "matched_semantic_differential"
+        ):
+            fingerprint = str(cluster["fingerprint"])
+            cluster["target_group_id"] = _target_group_id(fingerprint)
+            cluster["target_role"] = "primary"
+            transitions.append(cluster)
+
+    for cluster in clusters:
+        if cluster.get("target_qualified") is not True:
+            continue
+        if cluster.get("target_group_id") is not None:
+            continue
+        family = cluster.get("family")
+        outcome = cluster.get("outcome")
+        operators = set(cluster.get("mutation_operators", []))
+        matches: list[dict[str, JsonValue]] = []
+        for transition in transitions:
+            observations = transition.get("observations")
+            if not isinstance(observations, Mapping):
+                continue
+            mutation_outcomes = {
+                value.strip()
+                for value in str(observations.get("mutation_outcome", "")).split(",")
+                if value.strip()
+            }
+            transition_operators = set(transition.get("mutation_operators", []))
+            if (
+                observations.get("baseline_family") == family
+                and outcome in mutation_outcomes
+                and bool(operators & transition_operators)
+            ):
+                matches.append(transition)
+        if matches:
+            matched = min(matches, key=lambda item: str(item["artifact_id"]))
+            cluster["target_group_id"] = matched["target_group_id"]
+            cluster["target_role"] = "supporting"
+        else:
+            fingerprint = str(cluster["fingerprint"])
+            cluster["target_group_id"] = _target_group_id(fingerprint)
+            cluster["target_role"] = "primary"
 
 
 def analyze_exploration(
@@ -133,17 +217,17 @@ def analyze_exploration(
         evidence = load_evidence(run_dir / "evidence.json")
         bundle = discover_artifacts(scenario, evidence)
         write_artifacts(bundle, run_dir / "artifacts.json")
+        execution_complete = execution_is_complete(scenario, evidence)
         context = {
             "result": result,
             "scenario": scenario,
             "evidence": evidence,
             "run_dir": run_dir,
+            "execution_complete": execution_complete,
         }
         contexts.append(context)
         analyzed_trials += 1
-        if bundle.artifacts and all(item.execution_complete for item in bundle.artifacts):
-            completed_trials += 1
-        elif not bundle.artifacts and result.verdict != "inconclusive":
+        if execution_complete:
             completed_trials += 1
         for artifact in bundle.artifacts:
             record(artifact, context)
@@ -151,19 +235,32 @@ def analyze_exploration(
     baselines: dict[tuple[tuple[str, str], ...], list[Mapping[str, Any]]] = defaultdict(list)
     for context in contexts:
         result = context["result"]
-        if _is_baseline(result.assignments):
+        if _is_baseline(result.assignments) and context["execution_complete"]:
             baselines[_semantic_key(result.assignments)].append(context)
 
     for context in contexts:
         result = context["result"]
         controls = baselines.get(_semantic_key(result.assignments), [])
-        if not controls or _is_baseline(result.assignments):
+        if (
+            not controls
+            or _is_baseline(result.assignments)
+            or not context["execution_complete"]
+        ):
             continue
-        differences = discover_matched_differential_artifacts(
-            controls[0]["scenario"],
-            (control["evidence"] for control in controls),
-            context["scenario"],
-            context["evidence"],
+        control_evidence = tuple(control["evidence"] for control in controls)
+        differences = (
+            *discover_matched_semantic_differential_artifacts(
+                controls[0]["scenario"],
+                control_evidence,
+                context["scenario"],
+                context["evidence"],
+            ),
+            *discover_matched_differential_artifacts(
+                controls[0]["scenario"],
+                control_evidence,
+                context["scenario"],
+                context["evidence"],
+            ),
         )
         write_artifacts(
             ArtifactBundle(
@@ -199,6 +296,12 @@ def analyze_exploration(
             for item in items
             if isinstance(item.get("assignments"), Mapping)
         )
+        complete_occurrences_by_trajectory = Counter(
+            _trajectory_key(item["assignments"])
+            for item in items
+            if item["execution_complete"] is True
+            and isinstance(item.get("assignments"), Mapping)
+        )
         semantic_prevalence = max(
             (
                 count / trials_by_semantics[key]
@@ -225,6 +328,10 @@ def analyze_exploration(
         ) = max(reproduction_measurements, default=(0.0, 0.0, 0, 0))
         population_support = _wilson_lower(len(items), analyzed_trials)
         confirmed = reproduction_trials >= 3 and reproduction_occurrences >= 2
+        confirmed_complete = any(
+            trials_by_trajectory[key] >= 3 and count >= 2
+            for key, count in complete_occurrences_by_trajectory.items()
+        )
         schedule_sensitive_semantics = sum(
             0 < count < trials_by_semantics[key]
             for key, count in occurrences_by_semantics.items()
@@ -235,7 +342,22 @@ def analyze_exploration(
             and _is_baseline(item["assignments"])
             for item in items
         )
-        only_under_mutation = baseline_occurrences == 0
+        baseline_complete_occurrences = sum(
+            item["execution_complete"] is True
+            and isinstance(item.get("assignments"), Mapping)
+            and _is_baseline(item["assignments"])
+            for item in items
+        )
+        mutation_complete_occurrences = sum(
+            item["execution_complete"] is True
+            and isinstance(item.get("assignments"), Mapping)
+            and not _is_baseline(item["assignments"])
+            for item in items
+        )
+        observed_only_under_mutation = baseline_occurrences == 0
+        only_under_mutation = (
+            baseline_complete_occurrences == 0 and mutation_complete_occurrences > 0
+        )
         novelty = (
             1.0
             if analyzed_trials <= 1
@@ -253,7 +375,22 @@ def analyze_exploration(
             reproducibility=reproducibility,
             evidence_quality=evidence_quality,
         )
-        context_only = exemplar.family == "boundary_episode"
+        classification = artifact_class(exemplar)
+        context_only = classification == "context"
+        target_qualified = (
+            classification == "semantic"
+            and only_under_mutation
+            and confirmed_complete
+        )
+        mutation_operators = sorted(
+            {
+                operator
+                for item in items
+                if isinstance(item.get("assignments"), Mapping)
+                and not _is_baseline(item["assignments"])
+                for operator in _mutation_operators(item["assignments"])
+            }
+        )
         if context_only:
             priority = min(priority, 25)
         clusters.append(
@@ -272,7 +409,10 @@ def analyze_exploration(
                 "reproduction_trials": reproduction_trials,
                 "population_support": round(population_support, 6),
                 "confirmed": confirmed,
+                "confirmed_complete": confirmed_complete,
+                "artifact_class": classification,
                 "context_only": context_only,
+                "target_qualified": target_qualified,
                 "semantic_prevalence": round(semantic_prevalence, 6),
                 "baseline_divergence": round(divergence, 6),
                 "boundary_depth": boundary_depth,
@@ -281,10 +421,15 @@ def analyze_exploration(
                 "analyzed_trials": analyzed_trials,
                 "occurrence_rate": len(items) / analyzed_trials if analyzed_trials else 0.0,
                 "complete_occurrences": complete_occurrences,
+                "baseline_occurrences": baseline_occurrences,
+                "baseline_complete_occurrences": baseline_complete_occurrences,
+                "mutation_complete_occurrences": mutation_complete_occurrences,
                 "schedule_sensitive": schedule_sensitive,
                 "semantic_configuration_count": len(occurrences_by_semantics),
                 "schedule_sensitive_configuration_count": schedule_sensitive_semantics,
                 "only_under_mutation": only_under_mutation,
+                "observed_only_under_mutation": observed_only_under_mutation,
+                "mutation_operators": mutation_operators,
                 "actors": list(exemplar.actors),
                 "resources": list(exemplar.resources),
                 "boundary_phases": list(exemplar.boundary_phases),
@@ -293,6 +438,7 @@ def analyze_exploration(
                 "examples": items[:10],
             }
         )
+    _assign_target_groups(clusters)
     clusters.sort(
         key=lambda item: (
             -int(item["research_priority"]),
@@ -303,7 +449,7 @@ def analyze_exploration(
 
     manifest_raw = json.loads(manifest_path.read_text(encoding="utf-8"))
     report: dict[str, JsonValue] = {
-        "schema_version": 3,
+        "schema_version": 4,
         "exploration_kind": "stateful_runtime_artifact_discovery",
         "manifest": manifest_path.name,
         "base_scenario": manifest_raw.get("base_scenario"),
@@ -321,18 +467,41 @@ def analyze_exploration(
         "artifact_cluster_count": len(clusters),
         "context_cluster_count": sum(item["context_only"] is True for item in clusters),
         "semantic_artifact_cluster_count": sum(
-            item["context_only"] is False for item in clusters
+            item["artifact_class"] == "semantic" for item in clusters
+        ),
+        "diagnostic_cluster_count": sum(
+            item["artifact_class"] == "diagnostic" for item in clusters
         ),
         "novel_artifact_clusters": sum(
-            item["context_only"] is False and float(item["novelty"]) >= 0.75
+            item["artifact_class"] == "semantic" and float(item["novelty"]) >= 0.75
             for item in clusters
         ),
         "mutation_only_artifact_clusters": sum(
-            item["context_only"] is False and item["only_under_mutation"] is True
+            item["artifact_class"] == "semantic"
+            and item["only_under_mutation"] is True
             for item in clusters
         ),
         "confirmed_artifact_clusters": sum(
-            item["context_only"] is False and item["confirmed"] is True
+            item["artifact_class"] == "semantic" and item["confirmed"] is True
+            for item in clusters
+        ),
+        "confirmed_mutation_only_semantic_clusters": sum(
+            item["target_qualified"] is True for item in clusters
+        ),
+        "confirmed_mutation_only_semantic_groups": len(
+            {
+                item["target_group_id"]
+                for item in clusters
+                if item["target_qualified"] is True
+            }
+        ),
+        "mutation_only_diagnostic_clusters": sum(
+            item["artifact_class"] == "diagnostic"
+            and item["observed_only_under_mutation"] is True
+            for item in clusters
+        ),
+        "confirmed_diagnostic_clusters": sum(
+            item["artifact_class"] == "diagnostic" and item["confirmed"] is True
             for item in clusters
         ),
         "replicated_control_groups": sum(len(items) >= 3 for items in baselines.values()),

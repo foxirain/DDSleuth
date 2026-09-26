@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 
 from ddsleuth.campaign import run_campaign
-from ddsleuth.explorer import _wilson_lower, analyze_exploration
+from ddsleuth.explorer import _assign_target_groups, _wilson_lower, analyze_exploration
 from ddsleuth.matrix import MatrixDimension
 from ddsleuth.trajectory import generate_trajectories, write_trajectory_manifest
 
@@ -15,6 +15,58 @@ class TrajectoryTests(unittest.TestCase):
     def test_reproducibility_uses_a_confidence_bound_not_raw_one_shot_success(self) -> None:
         self.assertLess(_wilson_lower(1, 1), 0.25)
         self.assertGreater(_wilson_lower(10, 10), 0.70)
+
+    def test_target_groups_deduplicate_direct_and_transition_views(self) -> None:
+        operator = "causal:writer:revoke:after:write"
+        clusters = [
+            {
+                "artifact_id": "transition-delivery",
+                "fingerprint": "a" * 64,
+                "family": "semantic_outcome_transition",
+                "observation_class": "matched_semantic_differential",
+                "outcome": "replaced_under_mutation",
+                "target_qualified": True,
+                "mutation_operators": [operator],
+                "observations": {
+                    "baseline_family": "delivery_cardinality",
+                    "mutation_outcome": "exact",
+                },
+            },
+            {
+                "artifact_id": "direct-delivery",
+                "fingerprint": "b" * 64,
+                "family": "delivery_cardinality",
+                "observation_class": "runtime_semantic",
+                "outcome": "exact",
+                "target_qualified": True,
+                "mutation_operators": [operator],
+                "observations": {},
+            },
+            {
+                "artifact_id": "transition-split",
+                "fingerprint": "c" * 64,
+                "family": "semantic_outcome_transition",
+                "observation_class": "matched_semantic_differential",
+                "outcome": "absent_under_mutation",
+                "target_qualified": True,
+                "mutation_operators": [operator],
+                "observations": {
+                    "baseline_family": "split_enforcement_after_revocation",
+                    "mutation_outcome": "absent",
+                },
+            },
+        ]
+        _assign_target_groups(clusters)
+        self.assertEqual("primary", clusters[0]["target_role"])
+        self.assertEqual("supporting", clusters[1]["target_role"])
+        self.assertEqual(
+            clusters[0]["target_group_id"],
+            clusters[1]["target_group_id"],
+        )
+        self.assertNotEqual(
+            clusters[0]["target_group_id"],
+            clusters[2]["target_group_id"],
+        )
 
     def _raw_scenario(self) -> dict[str, object]:
         ready = (
@@ -230,6 +282,7 @@ class TrajectoryTests(unittest.TestCase):
             spacings_ms=(0,),
             barrier_modes=("preserve",),
             action_jitters_ms=(0, 25),
+            causal_order_mutations=False,
             budget=2,
         )
         mutated = next(
@@ -253,6 +306,7 @@ class TrajectoryTests(unittest.TestCase):
             barrier_modes=("preserve",),
             action_jitters_ms=(0,),
             boundary_offsets_ms=(0, 15),
+            causal_order_mutations=False,
             budget=2,
         )
         mutated = next(
@@ -262,6 +316,80 @@ class TrajectoryTests(unittest.TestCase):
         actions = mutated["execution"]["roles"][0]["actions"]
         self.assertEqual(20, actions[0]["at_ms"])
         self.assertEqual(65, actions[1]["at_ms"])
+
+    def test_causal_mutation_crosses_a_boundary_action_order_edge(self) -> None:
+        raw = self._raw_scenario()
+        raw["execution"]["roles"][0]["actions"] = [
+            {"id": "before", "at_ms": 0, "operation": "sample.write"},
+            {
+                "id": "revoked",
+                "at_ms": 10,
+                "operation": "credential.wait_revoked",
+            },
+            {"id": "after", "at_ms": 20, "operation": "sample.write"},
+        ]
+        trajectories = generate_trajectories(
+            raw,
+            spacings_ms=(0,),
+            barrier_modes=("preserve",),
+            action_jitters_ms=(0,),
+            boundary_offsets_ms=(0,),
+            budget=3,
+        )
+        causal = [
+            (case, assignments)
+            for case, assignments in trajectories
+            if "trajectory.causal_mutation" in assignments
+        ]
+        self.assertEqual(2, len(causal))
+        action_orders = {
+            tuple(
+                action["id"]
+                for action in case["execution"]["roles"][0]["actions"]
+            )
+            for case, _ in causal
+        }
+        self.assertEqual(
+            {
+                ("revoked", "before", "after"),
+                ("before", "after", "revoked"),
+            },
+            action_orders,
+        )
+        for case, assignments in causal:
+            times = [
+                action["at_ms"]
+                for action in case["execution"]["roles"][0]["actions"]
+            ]
+            self.assertEqual([0.0, 10.0, 20.0], times)
+            self.assertEqual(
+                "action_order_crossing",
+                assignments["trajectory.causal_mutation"]["kind"],
+            )
+
+    def test_causal_order_mutations_can_be_disabled(self) -> None:
+        raw = self._raw_scenario()
+        raw["execution"]["roles"][0]["actions"] = [
+            {"id": "write", "at_ms": 0, "operation": "sample.write"},
+            {
+                "id": "disconnect",
+                "at_ms": 10,
+                "operation": "participant.disconnect",
+            },
+        ]
+        trajectories = generate_trajectories(
+            raw,
+            spacings_ms=(0,),
+            barrier_modes=("preserve",),
+            causal_order_mutations=False,
+            budget=4,
+        )
+        self.assertTrue(
+            all(
+                "trajectory.causal_mutation" not in assignments
+                for _, assignments in trajectories
+            )
+        )
 
     def test_baseline_and_new_artifact_receive_selective_repetitions(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

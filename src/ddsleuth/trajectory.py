@@ -19,21 +19,46 @@ class TrajectoryError(ValueError):
 
 
 @dataclass(frozen=True, slots=True)
+class CausalActionMutation:
+    actor: str
+    action_id: str
+    anchor_action_id: str
+    relation: str
+    operation: str
+    anchor_operation: str
+
+    def to_dict(self) -> dict[str, JsonValue]:
+        return {
+            "kind": "action_order_crossing",
+            "actor": self.actor,
+            "action_id": self.action_id,
+            "operation": self.operation,
+            "relation": self.relation,
+            "anchor_action_id": self.anchor_action_id,
+            "anchor_operation": self.anchor_operation,
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class TrajectoryDescriptor:
     order: tuple[str, ...]
     spacing_ms: int
     barrier_mode: str
     action_jitter_ms: int = 0
     boundary_offset_ms: int = 0
+    causal_mutation: CausalActionMutation | None = None
 
     def to_dict(self) -> dict[str, JsonValue]:
-        return {
+        result: dict[str, JsonValue] = {
             "order": list(self.order),
             "spacing_ms": self.spacing_ms,
             "barrier_mode": self.barrier_mode,
             "action_jitter_ms": self.action_jitter_ms,
             "boundary_offset_ms": self.boundary_offset_ms,
         }
+        if self.causal_mutation is not None:
+            result["causal_mutation"] = self.causal_mutation.to_dict()
+        return result
 
 
 def _descriptor_digest(value: Mapping[str, Any]) -> str:
@@ -64,6 +89,7 @@ def _schedule_descriptors(
     barrier_modes: tuple[str, ...],
     action_jitters_ms: tuple[int, ...],
     boundary_offsets_ms: tuple[int, ...],
+    causal_mutations: tuple[CausalActionMutation, ...],
 ) -> list[TrajectoryDescriptor]:
     # Differential analysis needs one canonical control even when the caller
     # requests only relaxed schedules or omits zero from the spacing set.
@@ -87,7 +113,24 @@ def _schedule_descriptors(
             for jitter in action_jitters_ms
             for boundary_offset in boundary_offsets_ms
         )
-    unique: dict[tuple[tuple[str, ...], int, str, int, int], TrajectoryDescriptor] = {}
+    # Causal mutations are deliberately not multiplied by the broad timing
+    # grid. Each one is an isolated experiment against the canonical control,
+    # which keeps the changed edge attributable and the pool tractable.
+    descriptors.extend(
+        TrajectoryDescriptor(
+            actors,
+            0,
+            "preserve",
+            0,
+            0,
+            causal_mutation,
+        )
+        for causal_mutation in causal_mutations
+    )
+    unique: dict[
+        tuple[tuple[str, ...], int, str, int, int, CausalActionMutation | None],
+        TrajectoryDescriptor,
+    ] = {}
     for descriptor in descriptors:
         unique[(
             descriptor.order,
@@ -95,6 +138,7 @@ def _schedule_descriptors(
             descriptor.barrier_mode,
             descriptor.action_jitter_ms,
             descriptor.boundary_offset_ms,
+            descriptor.causal_mutation,
         )] = descriptor
     return list(unique.values())
 
@@ -115,11 +159,128 @@ _BOUNDARY_OPERATION_MARKERS = (
     "duplicate",
 )
 
+_CAUSAL_BOUNDARY_OPERATION_MARKERS = (
+    "credential.",
+    "authority.",
+    "authorization.",
+    "key.",
+    "participant.",
+    "endpoint.destroy",
+    "endpoint.recreate",
+    "transport.",
+)
+
 
 def _is_boundary_operation(operation: object) -> bool:
     return isinstance(operation, str) and any(
         marker in operation.lower() for marker in _BOUNDARY_OPERATION_MARKERS
     )
+
+
+def _is_causal_boundary_operation(operation: object) -> bool:
+    return isinstance(operation, str) and any(
+        marker in operation.lower() for marker in _CAUSAL_BOUNDARY_OPERATION_MARKERS
+    )
+
+
+def _causal_action_mutations(raw: Mapping[str, Any]) -> tuple[CausalActionMutation, ...]:
+    """Infer minimal action-order crossings around lifecycle boundaries.
+
+    A mutation moves exactly one boundary action across one adjacent action.
+    This changes a real happens-before edge instead of translating a whole
+    boundary phase while preserving its causal structure.
+    """
+
+    execution = raw.get("execution")
+    if not isinstance(execution, Mapping):
+        return ()
+    roles = execution.get("roles")
+    if not isinstance(roles, list):
+        return ()
+    mutations: list[CausalActionMutation] = []
+    resulting_orders: set[tuple[str, tuple[str, ...]]] = set()
+    for role in roles:
+        if not isinstance(role, Mapping) or not isinstance(role.get("actor"), str):
+            continue
+        actor = role["actor"]
+        actions = role.get("actions")
+        if not isinstance(actions, list) or len(actions) < 2:
+            continue
+        valid_actions = [
+            action
+            for action in actions
+            if isinstance(action, Mapping)
+            and isinstance(action.get("id"), str)
+            and isinstance(action.get("operation"), str)
+        ]
+        if len(valid_actions) != len(actions):
+            continue
+        original_ids = tuple(str(action["id"]) for action in valid_actions)
+        for index, action in enumerate(valid_actions):
+            operation = str(action["operation"])
+            if not _is_causal_boundary_operation(operation):
+                continue
+            candidates: list[tuple[int, str]] = []
+            if index > 0:
+                candidates.append((index - 1, "before"))
+            if index + 1 < len(valid_actions):
+                candidates.append((index + 1, "after"))
+            for anchor_index, relation in candidates:
+                anchor = valid_actions[anchor_index]
+                reordered = list(original_ids)
+                moved = reordered.pop(index)
+                target = reordered.index(str(anchor["id"]))
+                reordered.insert(target if relation == "before" else target + 1, moved)
+                order_key = (actor, tuple(reordered))
+                if order_key in resulting_orders or tuple(reordered) == original_ids:
+                    continue
+                resulting_orders.add(order_key)
+                mutations.append(
+                    CausalActionMutation(
+                        actor=actor,
+                        action_id=str(action["id"]),
+                        anchor_action_id=str(anchor["id"]),
+                        relation=relation,
+                        operation=operation,
+                        anchor_operation=str(anchor["operation"]),
+                    )
+                )
+    return tuple(mutations)
+
+
+def _apply_causal_action_mutation(
+    actions: list[Any],
+    mutation: CausalActionMutation,
+) -> list[Any]:
+    mutable = copy.deepcopy(actions)
+    positions = {
+        action.get("id"): index
+        for index, action in enumerate(mutable)
+        if isinstance(action, dict) and isinstance(action.get("id"), str)
+    }
+    if mutation.action_id not in positions or mutation.anchor_action_id not in positions:
+        raise TrajectoryError("causal mutation references an unknown action")
+    original_times = sorted(
+        float(action["at_ms"])
+        for action in mutable
+        if isinstance(action, dict) and isinstance(action.get("at_ms"), (int, float))
+    )
+    if len(original_times) != len(mutable):
+        raise TrajectoryError("causal mutation requires timed actions")
+    moved = mutable.pop(positions[mutation.action_id])
+    anchor_index = next(
+        index
+        for index, action in enumerate(mutable)
+        if isinstance(action, dict) and action.get("id") == mutation.anchor_action_id
+    )
+    insertion = anchor_index if mutation.relation == "before" else anchor_index + 1
+    mutable.insert(insertion, moved)
+    # Preserve the scenario's time envelope while changing which action owns
+    # each slot. Equal timestamps retain list order in the action-plan parser.
+    for action, at_ms in zip(mutable, original_times):
+        assert isinstance(action, dict)
+        action["at_ms"] = at_ms
+    return mutable
 
 
 def _apply_schedule(
@@ -169,6 +330,15 @@ def _apply_schedule(
                 # Preserve plan order even when two mutation windows overlap.
                 action["at_ms"] = max(previous, mutated)
                 previous = float(action["at_ms"])
+        if (
+            isinstance(actions, list)
+            and descriptor.causal_mutation is not None
+            and descriptor.causal_mutation.actor == actor
+        ):
+            role["actions"] = _apply_causal_action_mutation(
+                actions,
+                descriptor.causal_mutation,
+            )
         scheduled.append(role)
     execution["roles"] = scheduled
     return case
@@ -183,6 +353,7 @@ def generate_trajectories(
     barrier_modes: Iterable[str] = ("preserve", "relaxed"),
     action_jitters_ms: Iterable[int] = (0,),
     boundary_offsets_ms: Iterable[int] = (0,),
+    causal_order_mutations: bool = True,
     budget: int = 64,
     seed: int = 0,
 ) -> list[tuple[dict[str, Any], dict[str, JsonValue]]]:
@@ -235,6 +406,7 @@ def generate_trajectories(
             modes,
             jitters,
             boundary_offsets,
+            _causal_action_mutations(semantic_case) if causal_order_mutations else (),
         ):
             if (
                 descriptor.barrier_mode == "relaxed"
@@ -243,6 +415,7 @@ def generate_trajectories(
                 and descriptor.spacing_ms == 0
                 and descriptor.action_jitter_ms == 0
                 and descriptor.boundary_offset_ms == 0
+                and descriptor.causal_mutation is None
             ):
                 continue
             case = _apply_schedule(semantic_case, descriptor)
@@ -269,7 +442,9 @@ def generate_trajectories(
                 f"{base_title} [trajectory order={','.join(descriptor.order)}; "
                 f"spacing={descriptor.spacing_ms}ms; barriers={descriptor.barrier_mode}; "
                 f"action-jitter={descriptor.action_jitter_ms}ms; "
-                f"boundary-offset={descriptor.boundary_offset_ms}ms]"
+                f"boundary-offset={descriptor.boundary_offset_ms}ms; "
+                f"causal-mutation="
+                f"{descriptor.causal_mutation.action_id if descriptor.causal_mutation else 'none'}]"
             )
             parse_scenario(case)
             assignments: dict[str, JsonValue] = dict(semantic_assignments)
@@ -278,12 +453,17 @@ def generate_trajectories(
             assignments["trajectory.barrier_mode"] = descriptor.barrier_mode
             assignments["trajectory.action_jitter_ms"] = descriptor.action_jitter_ms
             assignments["trajectory.boundary_offset_ms"] = descriptor.boundary_offset_ms
+            if descriptor.causal_mutation is not None:
+                assignments["trajectory.causal_mutation"] = (
+                    descriptor.causal_mutation.to_dict()
+                )
             baseline = (
                 descriptor.order == actors
                 and descriptor.spacing_ms == 0
                 and descriptor.barrier_mode == "preserve"
                 and descriptor.action_jitter_ms == 0
                 and descriptor.boundary_offset_ms == 0
+                and descriptor.causal_mutation is None
             )
             selection_key = _descriptor_digest(
                 {
@@ -311,12 +491,28 @@ def generate_trajectories(
         group_key = _descriptor_digest({"seed": seed, "semantic": semantic})
         groups.setdefault(group_key, []).append(item)
     ordered_groups = sorted(groups.items())
+    def mutation_tier(
+        item: tuple[dict[str, Any], dict[str, JsonValue], bool, str],
+    ) -> int:
+        if item[2]:
+            return 0
+        assignments = item[1]
+        if "trajectory.causal_mutation" in assignments:
+            return 1
+        if assignments.get("trajectory.barrier_mode") == "relaxed":
+            return 2
+        if assignments.get("trajectory.boundary_offset_ms", 0) != 0:
+            return 3
+        if assignments.get("trajectory.action_jitter_ms", 0) != 0:
+            return 4
+        return 5
+
     for _, items in ordered_groups:
-        items.sort(key=lambda item: (not item[2], item[3]))
+        items.sort(key=lambda item: (mutation_tier(item), item[3]))
 
     selected: list[tuple[dict[str, Any], dict[str, JsonValue], bool, str]] = []
     if len(candidates) <= budget:
-        selected = sorted(candidates, key=lambda item: (not item[2], item[3]))
+        selected = sorted(candidates, key=lambda item: (mutation_tier(item), item[3]))
     else:
         # First pass: one baseline and one mutation per chosen semantic config.
         for _, items in ordered_groups:
@@ -361,6 +557,7 @@ def write_trajectory_manifest(
     barrier_modes: Iterable[str] = ("preserve", "relaxed"),
     action_jitters_ms: Iterable[int] = (0,),
     boundary_offsets_ms: Iterable[int] = (0,),
+    causal_order_mutations: bool = True,
     budget: int = 64,
     execution_budget: int | None = None,
     seed: int = 0,
@@ -377,6 +574,7 @@ def write_trajectory_manifest(
         barrier_modes=barrier_modes,
         action_jitters_ms=action_jitters_ms,
         boundary_offsets_ms=boundary_offsets_ms,
+        causal_order_mutations=causal_order_mutations,
         budget=budget,
         seed=seed,
     )
@@ -420,6 +618,7 @@ def write_trajectory_manifest(
         "barrier_modes": list(dict.fromkeys(barrier_modes)),
         "action_jitters_ms": list(dict.fromkeys(action_jitters_ms)),
         "boundary_offsets_ms": list(dict.fromkeys(boundary_offsets_ms)),
+        "causal_order_mutations": causal_order_mutations,
         "baseline_always_included": True,
         "cases": manifest_cases,
     }

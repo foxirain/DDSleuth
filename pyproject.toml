@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ddsleuth"
-version = "0.3.0a1"
+version = "0.4.0a1"
 description = "Stateful runtime artifact discovery for DDS security boundaries"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -31,7 +31,9 @@ Issues = "https://github.com/foxirain/DDSleuth/issues"
 [project.optional-dependencies]
 release = [
   "build>=1.2,<2",
+  "setuptools>=77,<82",
   "twine>=5,<7",
+  "wheel>=0.45,<1",
 ]
 
 [project.scripts]

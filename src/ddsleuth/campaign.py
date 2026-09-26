@@ -12,7 +12,9 @@ from typing import Any, Mapping
 from .adapters.fastdds import FastDDSAdapter
 from .artifacts import (
     discover_artifacts,
-    discover_matched_differential_artifacts,
+    discover_matched_semantic_differential_artifacts,
+    is_diagnostic_artifact,
+    is_semantic_artifact,
     write_artifacts,
 )
 from .campaign_types import ManifestCase
@@ -657,6 +659,7 @@ def run_campaign(
             and case.assignments.get("trajectory.spacing_ms") == 0
             and case.assignments.get("trajectory.action_jitter_ms", 0) == 0
             and case.assignments.get("trajectory.boundary_offset_ms", 0) == 0
+            and "trajectory.causal_mutation" not in case.assignments
         )
         initial_repetitions = baseline_repetitions if baseline_case else repetitions
         planned_repetitions = initial_repetitions
@@ -806,10 +809,9 @@ def run_campaign(
                         case_specific_artifacts.update(
                             item.fingerprint
                             for item in artifact_bundle.artifacts
-                            if item.family not in (
-                                "boundary_episode",
-                                "instrumentation_divergence",
-                            )
+                            if (
+                                item.execution_complete and is_semantic_artifact(item)
+                            ) or is_diagnostic_artifact(item)
                         )
             except (OSError, ValueError, RuntimeError) as error:
                 result = _error_result(
@@ -832,14 +834,19 @@ def run_campaign(
                 elif case_evidence and semantic_key in baseline_evidence:
                     controls = baseline_evidence[semantic_key]
                     for item in case_evidence:
-                        case_specific_artifacts.update(
-                            artifact.fingerprint
-                            for artifact in discover_matched_differential_artifacts(
+                        semantic_differences = (
+                            discover_matched_semantic_differential_artifacts(
                                 controls[0][0],
                                 (control[1] for control in controls),
                                 scenario,
                                 item,
                             )
+                        )
+                        case_specific_artifacts.update(
+                            artifact.fingerprint
+                            for artifact in semantic_differences
+                            if artifact.execution_complete
+                            and is_semantic_artifact(artifact)
                         )
                 newly_observed = sorted(case_specific_artifacts - seen_specific_artifacts)
                 seen_specific_artifacts.update(case_specific_artifacts)
