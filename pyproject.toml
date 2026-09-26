@@ -32,7 +32,7 @@ Issues = "https://github.com/foxirain/DDSleuth/issues"
 release = [
   "build>=1.2,<2",
   "setuptools>=77,<82",
-  "twine>=5,<7",
+  "twine>=5,<8",
   "wheel>=0.45,<1",
 ]
 
