@@ -4,7 +4,33 @@ All notable changes are recorded here. Versions follow Semantic Versioning, with
 Python pre-release spelling used for packages (`0.1.0a1`) and a human-readable Git tag
 (`v0.1.0-alpha.1`).
 
-## 0.2.0-alpha.1 — Unreleased
+## 0.3.0-alpha.1 — Unreleased
+
+### Changed
+
+- canonicalize differential traces as partial orders over explicit action, message,
+  key, and lifecycle correlations instead of actor callback adjacency;
+- repeat matched baselines separately from the exploration budget, suppress features
+  that vary within controls, and distinguish population support from exact-trajectory
+  reproducibility;
+- automatically confirm newly observed semantic artifacts without repeating the full
+  trajectory matrix;
+- focus timing mutations on revoke, rekey, reconnect, endpoint-lifecycle, and transport
+  boundaries;
+- guide future selections with semantic artifact fingerprints and a persistent cross-run
+  corpus rather than raw actor-local motif novelty;
+- classify generic boundary episodes as context-only clusters so they do not inflate
+  novel or mutation-only semantic artifact counts.
+
+### Added
+
+- key-recipient topology, identity/GUID epoch, post-revocation capability, and delivery
+  cardinality artifact families;
+- dynamically verified action-plan delta debugging plus a causal reduction prefilter;
+- control-noise, replicated-control, confirmed-cluster, context-cluster, and semantic
+  cluster metrics in exploration report schema v3.
+
+## 0.2.0-alpha.1
 
 - reposition the core as stateful runtime security discovery rather than a PoC prover;
 - make neutral runtime artifacts, rather than vulnerability candidates, the default

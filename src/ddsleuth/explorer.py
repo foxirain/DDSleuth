@@ -10,7 +10,7 @@ from .artifacts import (
     ArtifactBundle,
     RuntimeArtifact,
     discover_artifacts,
-    discover_differential_artifacts,
+    discover_matched_differential_artifacts,
     write_artifacts,
 )
 from .campaign import CampaignReport, load_manifest
@@ -34,6 +34,7 @@ def _trajectory_key(assignments: Mapping[str, JsonValue]) -> tuple[tuple[str, st
         sorted(
             (name, json.dumps(value, sort_keys=True, separators=(",", ":")))
             for name, value in assignments.items()
+            if name != "trajectory.scheduler_seed"
         )
     )
 
@@ -46,6 +47,7 @@ def _is_baseline(assignments: Mapping[str, JsonValue]) -> bool:
         assignments.get("trajectory.barrier_mode") == "preserve"
         and assignments.get("trajectory.spacing_ms") == 0
         and assignments.get("trajectory.action_jitter_ms", 0) == 0
+        and assignments.get("trajectory.boundary_offset_ms", 0) == 0
     )
 
 
@@ -146,20 +148,20 @@ def analyze_exploration(
         for artifact in bundle.artifacts:
             record(artifact, context)
 
-    baselines: dict[tuple[tuple[tuple[str, str], ...], int], Mapping[str, Any]] = {}
+    baselines: dict[tuple[tuple[str, str], ...], list[Mapping[str, Any]]] = defaultdict(list)
     for context in contexts:
         result = context["result"]
         if _is_baseline(result.assignments):
-            baselines[(_semantic_key(result.assignments), result.repetition)] = context
+            baselines[_semantic_key(result.assignments)].append(context)
 
     for context in contexts:
         result = context["result"]
-        baseline = baselines.get((_semantic_key(result.assignments), result.repetition))
-        if baseline is None or baseline is context:
+        controls = baselines.get(_semantic_key(result.assignments), [])
+        if not controls or _is_baseline(result.assignments):
             continue
-        differences = discover_differential_artifacts(
-            baseline["scenario"],
-            baseline["evidence"],
+        differences = discover_matched_differential_artifacts(
+            controls[0]["scenario"],
+            (control["evidence"] for control in controls),
             context["scenario"],
             context["evidence"],
         )
@@ -221,6 +223,8 @@ def analyze_exploration(
             reproduction_occurrences,
             reproduction_trials,
         ) = max(reproduction_measurements, default=(0.0, 0.0, 0, 0))
+        population_support = _wilson_lower(len(items), analyzed_trials)
+        confirmed = reproduction_trials >= 3 and reproduction_occurrences >= 2
         schedule_sensitive_semantics = sum(
             0 < count < trials_by_semantics[key]
             for key, count in occurrences_by_semantics.items()
@@ -249,6 +253,9 @@ def analyze_exploration(
             reproducibility=reproducibility,
             evidence_quality=evidence_quality,
         )
+        context_only = exemplar.family == "boundary_episode"
+        if context_only:
+            priority = min(priority, 25)
         clusters.append(
             {
                 "artifact_id": exemplar.artifact_id,
@@ -263,6 +270,9 @@ def analyze_exploration(
                 "reproducibility_observed": round(reproducibility_observed, 6),
                 "reproduction_occurrences": reproduction_occurrences,
                 "reproduction_trials": reproduction_trials,
+                "population_support": round(population_support, 6),
+                "confirmed": confirmed,
+                "context_only": context_only,
                 "semantic_prevalence": round(semantic_prevalence, 6),
                 "baseline_divergence": round(divergence, 6),
                 "boundary_depth": boundary_depth,
@@ -293,7 +303,7 @@ def analyze_exploration(
 
     manifest_raw = json.loads(manifest_path.read_text(encoding="utf-8"))
     report: dict[str, JsonValue] = {
-        "schema_version": 2,
+        "schema_version": 3,
         "exploration_kind": "stateful_runtime_artifact_discovery",
         "manifest": manifest_path.name,
         "base_scenario": manifest_raw.get("base_scenario"),
@@ -309,9 +319,28 @@ def analyze_exploration(
         "complete_trials": completed_trials,
         "infrastructure_errors": campaign.counts.get("error", 0),
         "artifact_cluster_count": len(clusters),
-        "novel_artifact_clusters": sum(float(item["novelty"]) >= 0.75 for item in clusters),
+        "context_cluster_count": sum(item["context_only"] is True for item in clusters),
+        "semantic_artifact_cluster_count": sum(
+            item["context_only"] is False for item in clusters
+        ),
+        "novel_artifact_clusters": sum(
+            item["context_only"] is False and float(item["novelty"]) >= 0.75
+            for item in clusters
+        ),
         "mutation_only_artifact_clusters": sum(
-            item["only_under_mutation"] is True for item in clusters
+            item["context_only"] is False and item["only_under_mutation"] is True
+            for item in clusters
+        ),
+        "confirmed_artifact_clusters": sum(
+            item["context_only"] is False and item["confirmed"] is True
+            for item in clusters
+        ),
+        "replicated_control_groups": sum(len(items) >= 3 for items in baselines.values()),
+        "control_groups": len(baselines),
+        "control_noise_features_suppressed": sum(
+            int(exemplar.observations.get("baseline_noise_feature_count", 0))
+            for exemplar in exemplars.values()
+            if exemplar.family == "baseline_runtime_divergence"
         ),
         "artifact_clusters": clusters,
     }

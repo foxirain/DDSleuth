@@ -93,6 +93,7 @@ class TrajectoryTests(unittest.TestCase):
                 "trajectory.spacing_ms": 0,
                 "trajectory.barrier_mode": "preserve",
                 "trajectory.action_jitter_ms": 0,
+                "trajectory.boundary_offset_ms": 0,
                 "trajectory.scheduler_seed": True,
             },
             assignments,
@@ -194,6 +195,7 @@ class TrajectoryTests(unittest.TestCase):
                 selection_strategy="artifact-guided",
                 execution_budget=3,
                 selection_seed=11,
+                corpus_path=root / "artifact-corpus.json",
             )
             self.assertEqual(3, campaign.case_count)
             self.assertEqual(3, len(campaign.cases))
@@ -207,6 +209,15 @@ class TrajectoryTests(unittest.TestCase):
             trace = campaign.selection["selection_trace"]
             self.assertTrue(trace[0]["baseline"])
             self.assertGreater(campaign.selection["covered_runtime_features"], 0)
+            corpus = json.loads((root / "artifact-corpus.json").read_text())
+            self.assertEqual("ddsleuth_runtime_artifact_corpus", corpus["kind"])
+            self.assertTrue(corpus["seen_runtime_features"])
+            self.assertTrue(
+                all(
+                    item.startswith("runtime:sha256:")
+                    for item in corpus["seen_runtime_features"]
+                )
+            )
 
     def test_action_jitter_mutates_plan_without_reordering_actions(self) -> None:
         raw = self._raw_scenario()
@@ -229,6 +240,74 @@ class TrajectoryTests(unittest.TestCase):
             item["at_ms"] for item in mutated["execution"]["roles"][0]["actions"]
         ]
         self.assertEqual(sorted(action_times), action_times)
+
+    def test_boundary_offset_targets_only_boundary_actions(self) -> None:
+        raw = self._raw_scenario()
+        raw["execution"]["roles"][0]["actions"] = [
+            {"id": "ordinary", "at_ms": 20, "operation": "application.write"},
+            {"id": "boundary", "at_ms": 50, "operation": "credential.revoke_local"},
+        ]
+        trajectories = generate_trajectories(
+            raw,
+            spacings_ms=(0,),
+            barrier_modes=("preserve",),
+            action_jitters_ms=(0,),
+            boundary_offsets_ms=(0, 15),
+            budget=2,
+        )
+        mutated = next(
+            case for case, assignments in trajectories
+            if assignments["trajectory.boundary_offset_ms"] == 15
+        )
+        actions = mutated["execution"]["roles"][0]["actions"]
+        self.assertEqual(20, actions[0]["at_ms"])
+        self.assertEqual(65, actions[1]["at_ms"])
+
+    def test_baseline_and_new_artifact_receive_selective_repetitions(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            raw = self._raw_scenario()
+            diagnostic = (
+                'DDSLEUTH_EVENT {"kind":"memory_safety.violation","actor":"denied",'
+                '"implementation":"fastdds","outcome":"detected",'
+                '"attributes":{"sanitizer":"asan","violation":"synthetic"}}'
+            )
+            raw["execution"]["roles"][1]["command"] = ["/bin/echo", diagnostic]
+            scenario_path = root / "scenario.json"
+            scenario_path.write_text(json.dumps(raw), encoding="utf-8")
+            manifest = write_trajectory_manifest(
+                scenario_path,
+                root / "trajectories",
+                spacings_ms=(0,),
+                barrier_modes=("preserve",),
+                budget=1,
+            )
+            campaign = run_campaign(
+                manifest,
+                root / "runs",
+                {},
+                repetitions=1,
+                baseline_repetitions=3,
+                confirmation_repetitions=2,
+            )
+            self.assertEqual(5, campaign.trial_count)
+            self.assertEqual(5, len(campaign.cases))
+            self.assertIsNotNone(campaign.confirmation)
+            assert campaign.confirmation is not None
+            self.assertEqual(1, campaign.confirmation["confirmed_case_count"])
+            self.assertEqual(2, campaign.confirmation["additional_trials"])
+            report = analyze_exploration(
+                manifest,
+                root / "runs",
+                campaign,
+                root / "exploration-report.json",
+            )
+            diagnostic_cluster = next(
+                item for item in report["artifact_clusters"]
+                if item["family"] == "runtime_memory_diagnostic"
+            )
+            self.assertTrue(diagnostic_cluster["confirmed"])
+            self.assertEqual(5, diagnostic_cluster["reproduction_trials"])
 
     def test_long_matrix_ids_remain_unique_after_trajectory_prefix_truncation(self) -> None:
         raw = self._raw_scenario()

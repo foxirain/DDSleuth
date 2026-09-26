@@ -16,7 +16,7 @@ Trajectory pool ----------> Artifact-guided scheduler <---+
 Implementation adapter ----> Normalized runtime events ---+
                                   |
                                   v
-                 Semantic state and causal motif engine
+                 Semantic state and partial-order engine
                                   |
                                   v
                   Artifact slicing and clustering
@@ -46,25 +46,31 @@ the baseline causal barriers. `relaxed` schedules deliberately remove them and e
 join/order races. The generator always retains a baseline and uses a deterministic seed
 to select the remaining schedules under a fixed execution budget.
 
-The artifact-guided scheduler executes one causal baseline first and then immediately
-uses feedback. It extracts semantic states, actor-local transitions and three-event
-motifs, shared-identifier causal edges, boundary milestones, and runtime diagnostics
+The artifact-guided scheduler executes a replicated causal baseline first and then
+immediately uses feedback. It extracts semantic states, shared-identifier partial-order
+edges, boundary milestones, semantic artifact fingerprints, and runtime diagnostics
 from each trace. Global log
 adjacency is excluded because poll/buffer order is not protocol causality. Run-specific
-GUIDs, timestamps, fingerprints, and measurements are also excluded. New diagnostics,
-milestones, causal edges, motifs, and states receive descending weights. Boundary
+GUIDs, timestamps, fingerprints, and measurements are also excluded. New semantic
+artifacts, diagnostics, milestones, causal edges, and states receive descending
+weights; raw actor-local motif novelty is not rewarded. Boundary
 composition is rewarded by depth—the number of distinct identity, authorization, key,
 lifecycle, transport, and application phases actually crossed—without predicting
 severity. The next case balances learned artifact yield with unseen static features
 and an exploration term. The report retains selection order, novelty reward,
 artifact-potential reward, zero-progress streak, and cumulative coverage. A
-configurable plateau terminates unproductive campaigns. This is runtime protocol
+configurable plateau terminates unproductive campaigns. A persistent, secret-free
+cross-run corpus carries semantic feature coverage and scheduler rewards into later
+campaigns. Corpus keys are domain-separated SHA-256 identifiers; assignment values,
+payloads, key fingerprints, and raw feature strings are not persisted. This is runtime protocol
 coverage, not compiler source-line coverage.
 
 Matrix dimensions remain useful for semantic controls, but they are inputs to the
 trajectory generator rather than the primary abstraction. Dotted paths can address
 array elements, allowing environment and command parameters of individual roles to be
 varied alongside their schedule. Roles can also carry a timed, ordered action plan.
+Boundary-focused offsets mutate only revoke, rekey, reconnect, lifecycle, and transport
+actions; broad stable jitter remains available as a separate dimension.
 The core validates and materializes the plan but treats action names as adapter-owned
 semantics; this keeps endpoint lifecycle execution vendor-neutral while allowing
 matrix paths to mutate individual action times and arguments.
@@ -156,27 +162,36 @@ Extraction has two complementary paths. Pattern-independent boundary episodes re
 a short actor-local window around authorization, credential, key, lifecycle,
 transport, and diagnostic boundaries. Interpretable extractors additionally record
 local/remote revocation enforcement splits, replay suppression or redelivery,
-participant key-epoch transitions, and runtime diagnostics. Explicit action IDs,
+participant key-epoch transitions, key-recipient topology, identity/GUID epoch
+binding, post-revocation capabilities, delivery cardinality, and runtime diagnostics. Explicit action IDs,
 messages, and run-local key identifiers close the causal slice; cross-process log
 adjacency never does.
 
-Each semantic configuration retains a baseline. Mutated executions are projected into
-count-bucketed states, causal transitions, actor motifs, milestones, and diagnostics.
-Any change is exported as a baseline differential artifact, without deciding which
-side is correct.
+Each semantic configuration retains replicated baselines. Mutated executions are
+projected into count-bucketed states and edges over explicit action, message, key, and
+lifecycle correlations. Features that vary among matched controls are suppressed as
+normal nondeterminism. A remaining change is exported as a baseline differential
+artifact, without deciding which side is correct.
 
 The exploration aggregator clusters artifacts across schedules and repetitions. It
 reports novelty, exact-trajectory reproducibility, semantic prevalence, baseline
-divergence, boundary depth, evidence quality, schedule sensitivity, and mutation-only
-status separately. A derived `research_priority` orders manual or model-assisted
+divergence, population support, control noise, boundary depth, evidence quality,
+schedule sensitivity, and mutation-only status separately. Context-only boundary
+episodes do not inflate semantic cluster counts. A derived `research_priority` orders manual or model-assisted
 review; it is explicitly not vulnerability severity.
+
+When a new semantic fingerprint appears, only that exact trajectory receives bounded
+confirmation executions. A causal prefilter can remove actions absent from the evidence
+slice; the dynamic reducer then accepts each further removal only if an execution
+reproduces the exact fingerprint.
 
 ## Campaign layer
 
 The campaign runner verifies scenario digests, materializes per-case identities and
 policies when requested, executes cases sequentially, and preserves evidence per
 trial. Repetitions retain every outcome and report violation rate, Wilson interval, and
-mixed-outcome status. Sequential execution remains the safe default until isolation of
+mixed-outcome status. Baseline and confirmation repetition counts are independent of
+the main exploration budget. Sequential execution remains the safe default until isolation of
 DDS domains and transport resources can be proven.
 
 Policy mutations are fail-closed. A campaign must materialize and sign policy artifacts

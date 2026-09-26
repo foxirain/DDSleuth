@@ -70,6 +70,7 @@
       "required": [
         "strategy", "seed", "pool_size", "execution_budget", "selected_cases",
         "covered_static_features", "covered_runtime_features",
+        "corpus_runtime_features", "new_runtime_features",
         "consecutive_no_progress_runs", "selection_trace"
       ],
       "properties": {
@@ -80,9 +81,44 @@
         "selected_cases": { "type": "integer", "minimum": 0 },
         "covered_static_features": { "type": "integer", "minimum": 0 },
         "covered_runtime_features": { "type": "integer", "minimum": 0 },
+        "corpus_runtime_features": { "type": "integer", "minimum": 0 },
+        "new_runtime_features": { "type": "integer", "minimum": 0 },
         "consecutive_no_progress_runs": { "type": "integer", "minimum": 0 },
         "stop_reason": { "type": "string", "minLength": 1 },
         "selection_trace": { "type": "array", "items": { "type": "object" } }
+      },
+      "additionalProperties": false
+    },
+    "confirmation": {
+      "type": "object",
+      "required": [
+        "baseline_repetitions", "confirmation_repetitions",
+        "confirmed_case_count", "additional_trials", "cases"
+      ],
+      "properties": {
+        "baseline_repetitions": { "type": "integer", "minimum": 1 },
+        "confirmation_repetitions": { "type": "integer", "minimum": 0 },
+        "confirmed_case_count": { "type": "integer", "minimum": 0 },
+        "additional_trials": { "type": "integer", "minimum": 0 },
+        "cases": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["case_index", "scenario_id", "trigger_fingerprints", "additional_trials"],
+            "properties": {
+              "case_index": { "type": "integer", "minimum": 0 },
+              "scenario_id": { "type": "string", "minLength": 1 },
+              "trigger_fingerprints": {
+                "type": "array",
+                "items": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+                "minItems": 1,
+                "uniqueItems": true
+              },
+              "additional_trials": { "type": "integer", "minimum": 1 }
+            },
+            "additionalProperties": false
+          }
+        }
       },
       "additionalProperties": false
     }

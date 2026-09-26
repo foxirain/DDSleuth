@@ -4,7 +4,12 @@ import json
 import unittest
 from pathlib import Path
 
-from ddsleuth.artifacts import discover_artifacts, discover_differential_artifacts
+from ddsleuth.artifacts import (
+    behavior_projection,
+    discover_artifacts,
+    discover_differential_artifacts,
+    discover_matched_differential_artifacts,
+)
 from ddsleuth.evidence import EvidenceBundle
 from ddsleuth.models import EvidenceEvent, EventKind
 from ddsleuth.scenario import parse_scenario
@@ -197,6 +202,168 @@ class RuntimeArtifactTests(unittest.TestCase):
         self.assertEqual("baseline_runtime_divergence", artifact.family)
         self.assertEqual("baseline_differential", artifact.observation_class)
         self.assertGreater(artifact.observations["added_feature_count"], 0)
+
+    def test_partial_order_projection_ignores_unrelated_event_interleaving(self) -> None:
+        scenario, first = self._bundle(
+            [
+                self._event(EventKind.ENDPOINT_CREATED, "alice", "created", endpoint="writer"),
+                self._event(EventKind.ENDPOINT_CREATED, "bob", "created", endpoint="reader"),
+            ],
+            run_id="first",
+        )
+        _, second = self._bundle(
+            [
+                self._event(EventKind.ENDPOINT_CREATED, "bob", "created", endpoint="reader"),
+                self._event(EventKind.ENDPOINT_CREATED, "alice", "created", endpoint="writer"),
+            ],
+            run_id="second",
+        )
+        self.assertEqual(behavior_projection(first), behavior_projection(second))
+        self.assertEqual(
+            (),
+            discover_differential_artifacts(scenario, first, scenario, second),
+        )
+
+    def test_replicated_controls_suppress_nondeterministic_features(self) -> None:
+        scenario, baseline_a = self._bundle(
+            [self._event(EventKind.PROBE_READY, "alice", "ready", endpoint="participant")],
+            run_id="baseline-a",
+        )
+        _, baseline_b = self._bundle(
+            [
+                self._event(EventKind.PROBE_READY, "alice", "ready", endpoint="participant"),
+                self._event(EventKind.ENDPOINT_MATCHED, "alice", "matched", endpoint="writer"),
+            ],
+            run_id="baseline-b",
+        )
+        _, baseline_c = self._bundle(
+            [self._event(EventKind.PROBE_READY, "alice", "ready", endpoint="participant")],
+            run_id="baseline-c",
+        )
+        _, current = self._bundle(
+            [
+                self._event(EventKind.PROBE_READY, "alice", "ready", endpoint="participant"),
+                self._event(EventKind.ENDPOINT_MATCHED, "alice", "matched", endpoint="writer"),
+                self._event(
+                    EventKind.ACCESS_CONTROL_DECISION,
+                    "mallory",
+                    "allowed",
+                    operation="create_datareader",
+                    resource="SecretTopic",
+                ),
+            ],
+            run_id="current",
+        )
+        artifact = discover_matched_differential_artifacts(
+            scenario,
+            (baseline_a, baseline_b, baseline_c),
+            scenario,
+            current,
+        )[0]
+        self.assertEqual(3, artifact.observations["baseline_sample_count"])
+        self.assertGreater(artifact.observations["baseline_noise_feature_count"], 0)
+        changed = json.dumps(artifact.observations["added_features"])
+        self.assertIn("access_control.decision", changed)
+        self.assertNotIn("endpoint.matched", changed)
+
+    def test_discovers_key_recipient_topology_without_exporting_key(self) -> None:
+        scenario, evidence = self._bundle(
+            [
+                self._event(
+                    EventKind.KEY_MATERIAL_OBSERVED,
+                    "alice",
+                    "observed",
+                    endpoint_class="user",
+                    observation_phase="generated",
+                    token_class="datawriter",
+                    key_class="sender",
+                    material_semantics="common_sender",
+                    key_fingerprint="run-secret",
+                ),
+                self._event(
+                    EventKind.KEY_MATERIAL_OBSERVED,
+                    "bob",
+                    "observed",
+                    endpoint_class="user",
+                    observation_phase="received",
+                    token_class="datawriter",
+                    key_class="sender",
+                    material_semantics="common_sender",
+                    key_fingerprint="run-secret",
+                ),
+            ]
+        )
+        artifact = next(
+            item for item in discover_artifacts(scenario, evidence).artifacts
+            if item.family == "key_recipient_topology"
+        )
+        self.assertEqual("single_recipient", artifact.outcome)
+        self.assertNotIn("run-secret", json.dumps(artifact.to_dict()))
+
+    def test_discovers_delivery_cardinality(self) -> None:
+        scenario, evidence = self._bundle(
+            [
+                self._event(
+                    EventKind.APPLICATION_OBSERVATION_WINDOW,
+                    "bob",
+                    "expired",
+                    expected_samples=2,
+                    observed_samples=1,
+                )
+            ]
+        )
+        artifact = next(
+            item for item in discover_artifacts(scenario, evidence).artifacts
+            if item.family == "delivery_cardinality"
+        )
+        self.assertEqual("missing", artifact.outcome)
+        self.assertEqual(-1, artifact.observations["delta_sign"])
+
+    def test_discovers_cross_actor_identity_binding_without_exporting_guid(self) -> None:
+        scenario, evidence = self._bundle(
+            [
+                self._event(
+                    EventKind.CREDENTIAL_AUTHENTICATED,
+                    "alice",
+                    "authorized",
+                    participant_guid="private-guid",
+                ),
+                self._event(
+                    EventKind.CREDENTIAL_AUTHENTICATED,
+                    "bob",
+                    "authorized",
+                    participant_guid="private-guid",
+                ),
+            ]
+        )
+        artifact = next(
+            item for item in discover_artifacts(scenario, evidence).artifacts
+            if item.family == "identity_guid_binding"
+        )
+        self.assertEqual("cross_actor_binding", artifact.outcome)
+        self.assertNotIn("private-guid", json.dumps(artifact.to_dict()))
+
+    def test_discovers_capability_observed_after_revocation(self) -> None:
+        scenario, evidence = self._bundle(
+            [
+                self._event(
+                    EventKind.CREDENTIAL_REVOKED,
+                    "alice",
+                    "revoked",
+                    local_identity=True,
+                ),
+                self._event(
+                    EventKind.DECRYPT_CAPABILITY,
+                    "alice",
+                    "demonstrated",
+                ),
+            ]
+        )
+        artifact = next(
+            item for item in discover_artifacts(scenario, evidence).artifacts
+            if item.family == "post_revocation_capability"
+        )
+        self.assertEqual("observed_after_revocation", artifact.outcome)
 
 
 if __name__ == "__main__":

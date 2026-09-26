@@ -24,6 +24,7 @@ class TrajectoryDescriptor:
     spacing_ms: int
     barrier_mode: str
     action_jitter_ms: int = 0
+    boundary_offset_ms: int = 0
 
     def to_dict(self) -> dict[str, JsonValue]:
         return {
@@ -31,6 +32,7 @@ class TrajectoryDescriptor:
             "spacing_ms": self.spacing_ms,
             "barrier_mode": self.barrier_mode,
             "action_jitter_ms": self.action_jitter_ms,
+            "boundary_offset_ms": self.boundary_offset_ms,
         }
 
 
@@ -61,36 +63,63 @@ def _schedule_descriptors(
     spacings_ms: tuple[int, ...],
     barrier_modes: tuple[str, ...],
     action_jitters_ms: tuple[int, ...],
+    boundary_offsets_ms: tuple[int, ...],
 ) -> list[TrajectoryDescriptor]:
     # Differential analysis needs one canonical control even when the caller
     # requests only relaxed schedules or omits zero from the spacing set.
     # Keeping it here (rather than bolting it onto the manifest later) also
     # subjects the baseline to the same scenario validation as every mutation.
     descriptors: list[TrajectoryDescriptor] = [
-        TrajectoryDescriptor(actors, 0, "preserve", 0)
+        TrajectoryDescriptor(actors, 0, "preserve", 0, 0)
     ]
     if "preserve" in barrier_modes:
         descriptors.extend(
-            TrajectoryDescriptor(actors, spacing, "preserve", jitter)
+            TrajectoryDescriptor(actors, spacing, "preserve", jitter, boundary_offset)
             for spacing in spacings_ms
             for jitter in action_jitters_ms
+            for boundary_offset in boundary_offsets_ms
         )
     if "relaxed" in barrier_modes:
         descriptors.extend(
-            TrajectoryDescriptor(tuple(order), spacing, "relaxed", jitter)
+            TrajectoryDescriptor(tuple(order), spacing, "relaxed", jitter, boundary_offset)
             for order in itertools.permutations(actors)
             for spacing in spacings_ms
             for jitter in action_jitters_ms
+            for boundary_offset in boundary_offsets_ms
         )
-    unique: dict[tuple[tuple[str, ...], int, str, int], TrajectoryDescriptor] = {}
+    unique: dict[tuple[tuple[str, ...], int, str, int, int], TrajectoryDescriptor] = {}
     for descriptor in descriptors:
         unique[(
             descriptor.order,
             descriptor.spacing_ms,
             descriptor.barrier_mode,
             descriptor.action_jitter_ms,
+            descriptor.boundary_offset_ms,
         )] = descriptor
     return list(unique.values())
+
+
+_BOUNDARY_OPERATION_MARKERS = (
+    "credential.revoke",
+    "authority.revoke",
+    "authorization.revoke",
+    "key.rotate",
+    "participant.disconnect",
+    "participant.reconnect",
+    "endpoint.destroy",
+    "endpoint.recreate",
+    "transport.",
+    "replay",
+    "drop",
+    "delay",
+    "duplicate",
+)
+
+
+def _is_boundary_operation(operation: object) -> bool:
+    return isinstance(operation, str) and any(
+        marker in operation.lower() for marker in _BOUNDARY_OPERATION_MARKERS
+    )
 
 
 def _apply_schedule(
@@ -117,16 +146,25 @@ def _apply_schedule(
         if descriptor.barrier_mode == "relaxed":
             role.pop("start_after", None)
         actions = role.get("actions")
-        if descriptor.action_jitter_ms and isinstance(actions, list):
+        if isinstance(actions, list) and (
+            descriptor.action_jitter_ms or descriptor.boundary_offset_ms
+        ):
             previous = 0.0
             for action_index, action in enumerate(actions):
                 if not isinstance(action, dict) or not isinstance(action.get("at_ms"), (int, float)):
                     continue
                 identity = f"{actor}:{action.get('id', action_index)}".encode()
                 direction = (hashlib.sha256(identity).digest()[0] % 3) - 1
+                boundary_offset = (
+                    descriptor.boundary_offset_ms
+                    if _is_boundary_operation(action.get("operation"))
+                    else 0
+                )
                 mutated = max(
                     0.0,
-                    float(action["at_ms"]) + direction * descriptor.action_jitter_ms,
+                    float(action["at_ms"])
+                    + direction * descriptor.action_jitter_ms
+                    + boundary_offset,
                 )
                 # Preserve plan order even when two mutation windows overlap.
                 action["at_ms"] = max(previous, mutated)
@@ -144,6 +182,7 @@ def generate_trajectories(
     spacings_ms: Iterable[int] = (0, 25, 250),
     barrier_modes: Iterable[str] = ("preserve", "relaxed"),
     action_jitters_ms: Iterable[int] = (0,),
+    boundary_offsets_ms: Iterable[int] = (0,),
     budget: int = 64,
     seed: int = 0,
 ) -> list[tuple[dict[str, Any], dict[str, JsonValue]]]:
@@ -164,6 +203,12 @@ def generate_trajectories(
         for value in jitters
     ):
         raise TrajectoryError("action jitters must be non-negative integers")
+    boundary_offsets = tuple(dict.fromkeys(boundary_offsets_ms))
+    if not boundary_offsets or any(
+        not isinstance(value, int) or isinstance(value, bool)
+        for value in boundary_offsets
+    ):
+        raise TrajectoryError("boundary offsets must be integers")
 
     dimensions = tuple(dimensions)
     if dimensions:
@@ -184,13 +229,20 @@ def generate_trajectories(
             isinstance(role, Mapping) and bool(role.get("start_after"))
             for role in original_roles
         )
-        for descriptor in _schedule_descriptors(actors, spacings, modes, jitters):
+        for descriptor in _schedule_descriptors(
+            actors,
+            spacings,
+            modes,
+            jitters,
+            boundary_offsets,
+        ):
             if (
                 descriptor.barrier_mode == "relaxed"
                 and not has_barriers
                 and descriptor.order == actors
                 and descriptor.spacing_ms == 0
                 and descriptor.action_jitter_ms == 0
+                and descriptor.boundary_offset_ms == 0
             ):
                 continue
             case = _apply_schedule(semantic_case, descriptor)
@@ -216,7 +268,8 @@ def generate_trajectories(
             case["title"] = (
                 f"{base_title} [trajectory order={','.join(descriptor.order)}; "
                 f"spacing={descriptor.spacing_ms}ms; barriers={descriptor.barrier_mode}; "
-                f"action-jitter={descriptor.action_jitter_ms}ms]"
+                f"action-jitter={descriptor.action_jitter_ms}ms; "
+                f"boundary-offset={descriptor.boundary_offset_ms}ms]"
             )
             parse_scenario(case)
             assignments: dict[str, JsonValue] = dict(semantic_assignments)
@@ -224,11 +277,13 @@ def generate_trajectories(
             assignments["trajectory.spacing_ms"] = descriptor.spacing_ms
             assignments["trajectory.barrier_mode"] = descriptor.barrier_mode
             assignments["trajectory.action_jitter_ms"] = descriptor.action_jitter_ms
+            assignments["trajectory.boundary_offset_ms"] = descriptor.boundary_offset_ms
             baseline = (
                 descriptor.order == actors
                 and descriptor.spacing_ms == 0
                 and descriptor.barrier_mode == "preserve"
                 and descriptor.action_jitter_ms == 0
+                and descriptor.boundary_offset_ms == 0
             )
             selection_key = _descriptor_digest(
                 {
@@ -305,6 +360,7 @@ def write_trajectory_manifest(
     spacings_ms: Iterable[int] = (0, 25, 250),
     barrier_modes: Iterable[str] = ("preserve", "relaxed"),
     action_jitters_ms: Iterable[int] = (0,),
+    boundary_offsets_ms: Iterable[int] = (0,),
     budget: int = 64,
     execution_budget: int | None = None,
     seed: int = 0,
@@ -320,6 +376,7 @@ def write_trajectory_manifest(
         spacings_ms=spacings_ms,
         barrier_modes=barrier_modes,
         action_jitters_ms=action_jitters_ms,
+        boundary_offsets_ms=boundary_offsets_ms,
         budget=budget,
         seed=seed,
     )
@@ -362,6 +419,7 @@ def write_trajectory_manifest(
         "spacings_ms": list(dict.fromkeys(spacings_ms)),
         "barrier_modes": list(dict.fromkeys(barrier_modes)),
         "action_jitters_ms": list(dict.fromkeys(action_jitters_ms)),
+        "boundary_offsets_ms": list(dict.fromkeys(boundary_offsets_ms)),
         "baseline_always_included": True,
         "cases": manifest_cases,
     }

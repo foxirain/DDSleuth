@@ -30,6 +30,13 @@ logs while they execute and sorts a fully timestamped native event set before as
 canonical `sequence` values. Legacy logs without timestamps retain source order and
 must not be used for cross-process lifecycle ordering claims.
 
+Differential discovery does not compare the merged event list directly. It builds a
+partial-order projection from semantic state multiplicity and edges backed by shared
+`action_id`/`source_action_id`, application message, or run-local key fingerprint.
+Unrelated actor and callback order is therefore observational noise rather than a new
+artifact. Actor-local adjacency remains available as diagnostic coverage only and is
+not rewarded by the artifact-guided scheduler.
+
 ## Evidence discipline
 
 - Events record observations, not severity conclusions.

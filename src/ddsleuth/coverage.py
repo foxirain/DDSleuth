@@ -3,8 +3,9 @@ from __future__ import annotations
 import hashlib
 import json
 import math
-from collections import defaultdict
+from collections import Counter, defaultdict
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Iterable
 
 from .campaign_types import ManifestCase
@@ -76,6 +77,11 @@ def _stable_value(value: JsonValue) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":"))
 
 
+def _feature_id(domain: str, feature: str) -> str:
+    digest = hashlib.sha256(f"{domain}\0{feature}".encode()).hexdigest()
+    return f"{domain}:sha256:{digest}"
+
+
 def _bucket(name: str, value: JsonValue) -> JsonValue:
     if name in _COUNT_ATTRIBUTES and isinstance(value, int):
         return "zero" if value == 0 else "one" if value == 1 else "many"
@@ -93,6 +99,63 @@ def semantic_state(event: EvidenceEvent) -> str:
     suffix = "|".join(f"{name}={value}" for name, value in attributes)
     core = f"{event.actor}|{event.kind}|{event.outcome}"
     return f"{core}|{suffix}" if suffix else core
+
+
+def _correlation_keys(event: EvidenceEvent) -> tuple[tuple[str, str], ...]:
+    """Return explicit run-local causality keys, never log adjacency."""
+
+    keys: list[tuple[str, str]] = []
+    action_id = event.attributes.get("action_id")
+    if isinstance(action_id, str) and action_id:
+        keys.append(("action", f"{event.actor}:{action_id}"))
+    source_action_id = event.attributes.get("source_action_id")
+    if isinstance(source_action_id, str) and source_action_id:
+        keys.append(("action", f"{event.actor}:{source_action_id}"))
+    for name in ("message", "key_fingerprint"):
+        value = event.attributes.get(name)
+        if isinstance(value, str) and value:
+            keys.append((name, value))
+    return tuple(keys)
+
+
+def partial_order_projection(evidence: EvidenceBundle) -> dict[str, int]:
+    """Canonicalize a trace modulo unrelated cross-process event ordering.
+
+    The projection contains a count-bucketed multiset of semantic states and
+    directed edges only when the events share an explicit action, message, or
+    run-local key identifier.  It intentionally has no edge for mere log
+    adjacency, so polling and callback interleavings do not manufacture a new
+    differential artifact.
+    """
+
+    state_counts = Counter(semantic_state(event) for event in evidence.events)
+    projection: dict[str, int] = {
+        f"state:{state}": 1 if count == 1 else 2
+        for state, count in state_counts.items()
+    }
+    correlated: dict[tuple[str, str], list[tuple[int, EvidenceEvent]]] = defaultdict(list)
+    for position, event in enumerate(evidence.events):
+        sequence = position if event.sequence is None else event.sequence
+        for key in _correlation_keys(event):
+            correlated[key].append((sequence, event))
+
+    for (kind, _), members in correlated.items():
+        # Sequence determines direction only among causally correlated events.
+        ordered = sorted(members, key=lambda item: item[0])
+        unique: list[str] = []
+        for _, event in ordered:
+            state = semantic_state(event)
+            if not unique or unique[-1] != state:
+                unique.append(state)
+        for left, right in zip(unique, unique[1:]):
+            projection[f"poedge:{kind}:{left}->{right}"] = 1
+
+    coverage = extract_runtime_coverage(evidence)
+    for milestone in coverage.milestones:
+        projection[f"milestone:{milestone}"] = 1
+    for anomaly in coverage.anomalies:
+        projection[f"anomaly:{anomaly}"] = 1
+    return projection
 
 
 def _event_milestones(event: EvidenceEvent) -> set[str]:
@@ -278,7 +341,7 @@ def _static_features(case: ManifestCase) -> frozenset[str]:
         for role in scenario.execution.roles:
             for action in role.actions:
                 features.add(f"action:{role.actor}:{action.operation}")
-    return frozenset(features)
+    return frozenset(_feature_id("static", feature) for feature in features)
 
 
 def _tie_break(seed: int, case: ManifestCase) -> str:
@@ -286,7 +349,23 @@ def _tie_break(seed: int, case: ManifestCase) -> str:
     return hashlib.sha256(value).hexdigest()
 
 
+def _semantic_case_key(case: ManifestCase) -> tuple[tuple[str, str], ...]:
+    return tuple(
+        sorted(
+            (name, _stable_value(value))
+            for name, value in case.assignments.items()
+            if not name.startswith("trajectory.")
+        )
+    )
+
+
 def _feature_weight(feature: str) -> float:
+    if feature.startswith("artifact:runtime_memory_diagnostic:"):
+        return 48.0
+    if feature.startswith("artifact:"):
+        return 16.0
+    if feature.startswith("partial:poedge:"):
+        return 4.0
     if feature.startswith("anomaly:"):
         return 32.0
     if feature.startswith("milestone:"):
@@ -337,6 +416,7 @@ def _frontier_score(coverage: RuntimeCoverage) -> float:
 class ArtifactGuidedScheduler:
     cases: tuple[ManifestCase, ...]
     seed: int = 0
+    corpus_path: Path | None = None
     _static: dict[int, frozenset[str]] = field(init=False, default_factory=dict)
     _seen_static: set[str] = field(init=False, default_factory=set)
     _seen_runtime: set[str] = field(init=False, default_factory=set)
@@ -346,9 +426,53 @@ class ArtifactGuidedScheduler:
     _trace: list[dict[str, JsonValue]] = field(init=False, default_factory=list)
     _no_progress_runs: int = field(init=False, default=0)
     _stop_reason: str | None = field(init=False, default=None)
+    _initial_runtime_features: int = field(init=False, default=0)
+    _baseline_semantics: set[tuple[tuple[str, str], ...]] = field(
+        init=False,
+        default_factory=set,
+    )
 
     def __post_init__(self) -> None:
         self._static = {case.index: _static_features(case) for case in self.cases}
+        if self.corpus_path is not None and self.corpus_path.is_file():
+            raw = json.loads(self.corpus_path.read_text(encoding="utf-8"))
+            if not isinstance(raw, dict) or raw.get("schema_version") != 1:
+                raise ValueError("artifact corpus schema_version must be 1")
+            seen = raw.get("seen_runtime_features", [])
+            visits = raw.get("feature_visits", {})
+            rewards = raw.get("feature_rewards", {})
+            if not isinstance(seen, list) or not isinstance(visits, dict) or not isinstance(rewards, dict):
+                raise ValueError("artifact corpus fields are invalid")
+            self._seen_runtime.update(
+                str(item)
+                for item in seen
+                if isinstance(item, str) and item.startswith("runtime:sha256:")
+            )
+            self._feature_visits.update(
+                {str(key): int(value) for key, value in visits.items() if int(value) >= 0}
+            )
+            self._feature_reward.update(
+                {str(key): float(value) for key, value in rewards.items()}
+            )
+        self._initial_runtime_features = len(self._seen_runtime)
+
+    def save_corpus(self) -> None:
+        if self.corpus_path is None:
+            return
+        self.corpus_path.parent.mkdir(parents=True, exist_ok=True)
+        value = {
+            "schema_version": 1,
+            "kind": "ddsleuth_runtime_artifact_corpus",
+            "seen_runtime_features": sorted(self._seen_runtime),
+            "feature_visits": dict(sorted(self._feature_visits.items())),
+            "feature_rewards": {
+                key: round(value, 6)
+                for key, value in sorted(self._feature_reward.items())
+            },
+        }
+        temporary = self.corpus_path.with_suffix(self.corpus_path.suffix + ".tmp")
+        temporary.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        temporary.replace(self.corpus_path)
 
     @staticmethod
     def _is_baseline(case: ManifestCase) -> bool:
@@ -359,6 +483,7 @@ class ArtifactGuidedScheduler:
             case.assignments.get("trajectory.barrier_mode") == "preserve"
             and case.assignments.get("trajectory.spacing_ms") == 0
             and case.assignments.get("trajectory.action_jitter_ms", 0) == 0
+            and case.assignments.get("trajectory.boundary_offset_ms", 0) == 0
         )
 
     def choose(self, pending: Iterable[ManifestCase]) -> ManifestCase:
@@ -371,6 +496,19 @@ class ArtifactGuidedScheduler:
             baselines = tuple(case for case in choices if self._is_baseline(case))
             if baselines:
                 return min(baselines, key=lambda case: _tie_break(self.seed, case))
+
+        # A mutation is useful for differential discovery only after its matched
+        # semantic control has executed. Keep other baselines eligible so the
+        # scheduler can move between semantic configurations without starving
+        # the feedback loop.
+        controlled_choices = tuple(
+            case
+            for case in choices
+            if self._is_baseline(case)
+            or _semantic_case_key(case) in self._baseline_semantics
+        )
+        if controlled_choices:
+            choices = controlled_choices
 
         total_visits = max(1, len(self._trace))
 
@@ -405,6 +543,7 @@ class ArtifactGuidedScheduler:
         valid_execution = True
         artifact_potential = 0.0
         runtime_anomaly = False
+        semantic_artifact_count = 0
         for bundle in evidence:
             coverage = extract_runtime_coverage(bundle)
             state_count += len(coverage.states)
@@ -417,17 +556,49 @@ class ArtifactGuidedScheduler:
                 continue
             artifact_potential = max(artifact_potential, _artifact_potential(coverage))
             runtime_anomaly = runtime_anomaly or bool(coverage.anomalies)
-            combined.update(coverage.features)
-        new_runtime = combined - self._seen_runtime
-        novelty_reward = sum(_feature_weight(feature) for feature in new_runtime)
+            combined.update(
+                feature
+                for feature in coverage.features
+                if not feature.startswith("motif:")
+            )
+            combined.update(
+                f"partial:{feature}"
+                for feature in partial_order_projection(bundle)
+            )
+            # Local import avoids a module cycle: artifact extraction itself
+            # consumes the coverage primitives above.
+            from .artifacts import discover_artifacts
+
+            scenario = load_scenario(case.scenario_path)
+            artifacts = discover_artifacts(scenario, bundle).artifacts
+            semantic = [item for item in artifacts if item.family != "boundary_episode"]
+            semantic_artifact_count += len(semantic)
+            combined.update(
+                f"artifact:{item.family}:{item.fingerprint}" for item in semantic
+            )
+        new_runtime_features = {
+            feature
+            for feature in combined
+            if _feature_id("runtime", feature) not in self._seen_runtime
+        }
+        new_runtime = {
+            _feature_id("runtime", feature) for feature in new_runtime_features
+        }
+        novelty_reward = sum(
+            _feature_weight(feature) for feature in new_runtime_features
+        )
         reward = novelty_reward + artifact_potential
         features = self._static[case.index]
         for feature in features:
             self._feature_visits[feature] = self._feature_visits.get(feature, 0) + 1
             self._feature_reward[feature] = self._feature_reward.get(feature, 0.0) + reward
         self._seen_static.update(features)
-        self._seen_runtime.update(combined)
+        self._seen_runtime.update(
+            _feature_id("runtime", feature) for feature in combined
+        )
         self._selected.add(case.index)
+        if self._is_baseline(case):
+            self._baseline_semantics.add(_semantic_case_key(case))
         self._no_progress_runs = (
             0 if (new_runtime or runtime_anomaly) else self._no_progress_runs + 1
         )
@@ -443,6 +614,7 @@ class ArtifactGuidedScheduler:
                 "runtime_motif_count": motif_count,
                 "runtime_milestone_count": milestone_count,
                 "runtime_anomaly_count": anomaly_count,
+                "semantic_artifact_count": semantic_artifact_count,
                 "valid_execution": valid_execution,
                 "new_runtime_features": len(new_runtime),
                 "novelty_reward": round(novelty_reward, 3),
@@ -469,6 +641,8 @@ class ArtifactGuidedScheduler:
             "selected_cases": len(self._trace),
             "covered_static_features": len(self._seen_static),
             "covered_runtime_features": len(self._seen_runtime),
+            "corpus_runtime_features": self._initial_runtime_features,
+            "new_runtime_features": len(self._seen_runtime) - self._initial_runtime_features,
             "consecutive_no_progress_runs": self._no_progress_runs,
             "selection_trace": list(self._trace),
         }

@@ -28,14 +28,16 @@ An artifact contains:
 - evidence completeness and quality metadata;
 - descriptive measurements that do not contain secret key values.
 
-The five observation classes are `boundary_trace`, `boundary_behavior`,
-`baseline_differential`, `runtime_diagnostic`, and `instrumentation_diagnostic`.
+Observation classes include `boundary_trace`, `boundary_behavior`,
+`boundary_topology`, `boundary_binding`, `boundary_capability`,
+`boundary_cardinality`, `baseline_differential`, `runtime_diagnostic`, and
+`instrumentation_diagnostic`.
 
 ## Causality
 
 DDSleuth accepts the following relations as causal evidence:
 
-1. program order within one actor;
+1. bounded program-order context within one actor for evidence slicing;
 2. a shared runner-generated action identifier;
 3. a replay event's explicit source capture identifier;
 4. a shared application message identifier inside an isolated experiment;
@@ -52,19 +54,19 @@ degenerating into the complete trace.
 
 ## Stable behavior projection
 
-Baseline differentials compare a projection rather than raw event JSON. The projection
-contains:
+Baseline differentials compare a partial-order projection rather than raw event JSON.
+The projection contains:
 
 - normalized semantic states with occurrence counts bucketed as `one` or `many`;
-- actor-local state transitions;
-- actor-local three-event motifs;
-- explicit cross-actor causal transitions;
+- directed edges only between events joined by an explicit action, source action,
+  message, or run-local key correlation;
 - boundary milestones;
 - runtime and instrumentation diagnostics.
 
-Run-local identifiers and measurements are excluded. A difference therefore represents
-a semantic outcome, ordering, or coarse multiplicity change instead of normal GUID or
-key randomness.
+Run-local identifiers and measurements are excluded. Unrelated callback and polling
+orders collapse to the same projection. At least three matched baseline repetitions
+are used when available; any feature that varies within those controls is classified
+as control noise and removed from mutation deltas.
 
 ## Ranking dimensions
 
@@ -74,6 +76,8 @@ Cluster ranking keeps independent dimensions visible:
 - **reproducibility:** the Wilson 95% lower bound for the best exact-trajectory
   repeat rate, reported beside its raw rate and trial count so a single observation
   cannot masquerade as proven stability;
+- **population support:** a separate Wilson lower bound over the complete campaign;
+  it is breadth of observation, not exact-condition reproducibility;
 - **semantic prevalence:** the best occurrence rate across schedules within one
   semantic configuration;
 - **baseline divergence:** whether the artifact is a differential or occurs only under
@@ -81,10 +85,24 @@ Cluster ranking keeps independent dimensions visible:
 - **boundary depth:** how many distinct runtime phases the slice crosses;
 - **evidence quality:** structured-source coverage and execution completeness.
 
+An artifact is `confirmed` only after at least three executions of one exact
+trajectory with at least two reproductions. Generic `boundary_episode` clusters are
+marked `context_only`, capped in review priority, and excluded from semantic novelty
+and mutation-only counts.
+
 `research_priority` is a bounded weighted summary used only to order review. It must
 not be converted into CVSS, exploitability, or a vulnerability label. Downstream human
 or model-assisted analysis consumes the artifact and performs source tracing,
 security-property definition, validation, and disclosure work.
+
+## Minimization
+
+A causal prefilter retains actions whose identifiers occur in the evidence slice, but
+it is not proof that the artifact survives. Artifact-preserving minimization uses
+delta debugging with execution in the loop: an action removal is accepted only when
+the exact target fingerprint reappears. Role offsets and action delays are then reduced
+under the same preservation rule. Reports retain original/minimized action counts,
+timing sums, and execution-trial count.
 
 ## Research evaluation
 

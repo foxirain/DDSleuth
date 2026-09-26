@@ -40,6 +40,7 @@ def main() -> None:
             validate_names(wheels[0], wheel_names)
             required_wheel_suffixes = (
                 "ddsleuth/__init__.py",
+                "ddsleuth/reduction.py",
                 ".dist-info/entry_points.txt",
                 ".dist-info/licenses/LICENSE",
             )
@@ -58,6 +59,7 @@ def main() -> None:
             "/schemas/artifacts.schema.json",
             "/docs/ARTIFACT_MODEL.md",
             "/tests/test_scenario.py",
+            "/tests/test_reduction.py",
             "/probes/fastdds_instrumentation/fastdds-f6376882-ddsleuth-observer.patch",
         )
         for suffix in required_source_suffixes:

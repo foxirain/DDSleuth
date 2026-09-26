@@ -45,8 +45,10 @@ failure.
 
 ## Repetition and nondeterminism
 
-Exploratory campaigns may use one trial per case. A result intended for disclosure or
-publication should use at least ten independent trials after the scenario is frozen.
+Exploratory campaigns use at least three matched control trials and may begin with one
+trial per mutation. A newly observed semantic artifact receives bounded confirmation
+trials of the exact trajectory. A result intended for disclosure or publication should
+use at least ten independent trials after the scenario is frozen.
 The campaign report retains each trial and reports:
 
 - pass, violation, inconclusive, and infrastructure-error counts;
@@ -56,6 +58,8 @@ The campaign report retains each trial and reports:
 
 Do not discard warm-up failures or rerun only failed cases. If a harness defect is
 fixed, change the scenario or implementation artifact digest and begin a new campaign.
+Features that vary among matched controls are reported as control noise and excluded
+from baseline differentials; they are not silently deleted from the original evidence.
 
 ## Fast DDS controlled variables
 
@@ -113,15 +117,20 @@ static-analysis baseline, and a packet-fuzzing baseline under equal wall-clock a
 compute budgets. Report at least:
 
 - unique artifact clusters per execution-hour;
+- semantic artifact clusters and context-only boundary clusters separately;
 - time to first mutation-only artifact;
 - novelty and exact-trajectory reproducibility as separate distributions;
+- population support, confirmed-cluster count, and control-noise features suppressed;
 - semantic prevalence and schedule sensitivity;
 - baseline differential precision after manual classification;
 - median causal-slice reduction relative to the complete trace;
 - instrumentation-divergence and inconclusive rates;
-- runtime states, transitions, motifs, and boundary phases covered per execution;
+- runtime states, partial-order causal edges, semantic artifacts, and boundary phases
+  covered per execution;
 - artifact-guided versus seeded-random yield under the same budget;
 - cluster stability across independent scheduler seeds;
+- original/minimized action counts and executions required by artifact-preserving
+  delta debugging;
 - implementation-specific code required outside the shared event/artifact core.
 
 Validated vulnerabilities may be reported as a downstream outcome, but vulnerability

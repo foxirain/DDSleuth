@@ -47,16 +47,17 @@ identity generation, signed Governance and Permissions generation, structured na
 events, event-driven process barriers, run-local key fingerprints, fail-closed
 invariant evaluation, Cartesian and pairwise matrices, resumable repeated campaigns,
 configuration and executable provenance, reliability summaries, stateful trajectory
-generation, partial-trace preservation, causal artifact extraction, baseline
+generation, partial-trace preservation, causal artifact extraction, replicated-control
 differentials, and schedule-sensitive artifact clustering. A vendor-neutral timed action-plan model
 now drives endpoint and participant lifecycles, real certificate-expiry revocation,
 and loopback transport faults. The Fast DDS probe can disconnect and recreate a
 secure participant in-process; the revision-pinned observer records the resulting
 remote revoke and participant master-key regeneration. A separate loopback-only
 shim can drop, delay, duplicate, or replay the exact UDP wire datagram. Exploration
-selects from a larger trajectory pool using semantic states, actor-local causal
-motifs, boundary depth, and runtime novelty rather than truncating a precomputed
-matrix. The legacy
+selects from a larger trajectory pool using partial-order causal edges, semantic
+artifact fingerprints, boundary depth, and a persistent cross-run corpus rather than
+truncating a precomputed matrix. Generic boundary episodes remain available as context
+but do not inflate semantic novelty counts. The legacy
 three-party Fast DDS harness remains a private golden regression case; no
 finding-specific trigger or unpatched exploit module is embedded in the public core.
 
@@ -187,7 +188,9 @@ ddsleuth explore \
   --spacing-ms 25 \
   --spacing-ms 250 \
   --barrier-mode preserve \
-  --barrier-mode relaxed
+  --barrier-mode relaxed \
+  --baseline-repetitions 3 \
+  --confirmation-repetitions 2
 ```
 
 `preserve` trajectories retain causal event barriers while varying launch offsets.
@@ -197,19 +200,28 @@ even when only relaxed mutations or nonzero spacings are requested; the remainin
 pool is selected deterministically from the configured seed. In the default
 `artifact-guided` strategy, the baseline executes first. Each completed trace is
 normalized into protocol states, actor-local transitions and three-event motifs,
-explicit causal edges, boundary milestones, and diagnostics; GUIDs, timestamps, raw
+explicit causal edges, boundary milestones, and diagnostics; differential comparison
+uses only a partial-order projection over explicit action, message, key, and lifecycle
+correlations. GUIDs, timestamps, raw
 key fingerprints, and application payloads are excluded from identity. Cross-process
-log adjacency is never treated as protocol causality. Static schedule features that
-produce new motifs, deeper boundary composition, or new differential behavior receive
-energy when the next trajectory is selected. `--plateau-window` stops a campaign after
+log adjacency and unrelated callback order are never treated as protocol causality.
+Static schedule features that produce new semantic artifacts, deeper boundary
+composition, or new explicit causal edges receive energy when the next trajectory is
+selected. The cross-run corpus defaults to `OUTPUT_ROOT/artifact-corpus.json`.
+`--plateau-window` stops a campaign after
 repeated zero-novelty trajectories (20 by default; 0 disables it). The `--budget`
 limits executions while `--pool-size` controls the trajectory pool (default four times
 the budget). `--action-jitter-ms` adds stable per-action timing mutations without
-reordering a plan. Every trial writes `evidence.json`, `report.json`, and
+reordering a plan. `--boundary-offset-ms` moves only revoke, rekey, reconnect,
+endpoint-lifecycle, and transport actions around the security boundary. Controls are
+repeated three times by default; a new semantic artifact causes only its exact
+trajectory to receive two confirmation executions. Every trial writes `evidence.json`, `report.json`, and
 `artifacts.json`; mutated trials also receive `differential-artifacts.json` when their
 stable behavior projection differs from the baseline. The top-level
 `exploration-report.json` keeps novelty, reproducibility, semantic prevalence,
-baseline divergence, boundary depth, and evidence quality as separate dimensions.
+population support, control noise, baseline divergence, boundary depth, and evidence
+quality as separate dimensions. Context-only and semantic clusters are counted
+separately.
 `research_priority` orders review work only; it is not severity.
 
 ASan, UBSan, TSan, and MSan output is normalized into `memory_safety.violation`
@@ -219,6 +231,18 @@ downstream analysis decides what it means.
 
 The formal artifact fields, causal-slicing rules, ranking dimensions, and research
 evaluation metrics are specified in [`docs/ARTIFACT_MODEL.md`](docs/ARTIFACT_MODEL.md).
+
+Build a structural prefilter before dynamic artifact-preserving minimization:
+
+```sh
+ddsleuth plan-reduction scenario.json run/evidence.json ARTIFACT_FINGERPRINT \
+  --output run/reduction-plan.json
+```
+
+The prefilter is explicitly marked unverified. The Python
+`ddsleuth.reduction.minimize_action_plan` API performs true delta debugging: every
+accepted action removal must reproduce the exact target fingerprint through an
+execution callback.
 
 Large structured-mode logs are compacted after event ingestion: the readable `.log`
 keeps every `DDSLEUTH_EVENT` and bounded diagnostic head/tail sections, while the

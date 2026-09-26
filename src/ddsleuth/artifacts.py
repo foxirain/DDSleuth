@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable, Mapping
 
-from .coverage import extract_runtime_coverage, semantic_state
+from .coverage import partial_order_projection, semantic_state
 from .evidence import EvidenceBundle
 from .models import EvidenceEvent, EventKind, JsonValue, Scenario
 
@@ -600,6 +600,252 @@ def _key_epoch_artifacts(
     return artifacts
 
 
+def _key_recipient_artifacts(
+    evidence: EvidenceBundle,
+    execution_complete: bool,
+) -> list[RuntimeArtifact]:
+    """Describe the observed distribution topology without exporting key values."""
+
+    indexed = [(_sequence(event, index), event) for index, event in enumerate(evidence.events)]
+    by_fingerprint: dict[str, list[tuple[int, EvidenceEvent]]] = defaultdict(list)
+    for sequence, event in indexed:
+        fingerprint = event.attributes.get("key_fingerprint")
+        if (
+            event.kind == EventKind.KEY_MATERIAL_OBSERVED
+            and event.outcome == "observed"
+            and event.attributes.get("endpoint_class") == "user"
+            and isinstance(fingerprint, str)
+        ):
+            by_fingerprint[fingerprint].append((sequence, event))
+
+    artifacts: list[RuntimeArtifact] = []
+    for members in by_fingerprint.values():
+        generated = [item for item in members if item[1].attributes.get("observation_phase") == "generated"]
+        received = [item for item in members if item[1].attributes.get("observation_phase") == "received"]
+        if not generated:
+            continue
+        generators = {event.actor for _, event in generated}
+        recipients = {event.actor for _, event in received}
+        if not recipients:
+            outcome = "no_received_observation"
+        elif len(recipients) == 1:
+            outcome = "single_recipient"
+        else:
+            outcome = "multiple_recipients"
+        shape = {
+            (
+                str(event.attributes.get("token_class", "unknown")),
+                str(event.attributes.get("key_class", "unknown")),
+                str(event.attributes.get("material_semantics", "unknown")),
+            )
+            for _, event in members
+        }
+        artifacts.append(
+            _make_artifact(
+                evidence=evidence,
+                family="key_recipient_topology",
+                title="Observed user-key material followed a recipient topology",
+                observation_class="boundary_topology",
+                outcome=outcome,
+                actors=generators | recipients,
+                resources=(),
+                seed_events=(sequence for sequence, _ in members),
+                execution_complete=execution_complete,
+                observations={
+                    "generator_count": len(generators),
+                    "recipient_count": len(recipients),
+                    "key_shape_count": len(shape),
+                },
+                signature=(
+                    f"key_topology:generators={len(generators)}",
+                    f"key_topology:recipients={len(recipients)}",
+                    *(f"key_shape:{':'.join(item)}" for item in sorted(shape)),
+                ),
+            )
+        )
+    return artifacts
+
+
+def _identity_binding_artifacts(
+    evidence: EvidenceBundle,
+    execution_complete: bool,
+) -> list[RuntimeArtifact]:
+    indexed = [(_sequence(event, index), event) for index, event in enumerate(evidence.events)]
+    authenticated = [
+        (sequence, event)
+        for sequence, event in indexed
+        if event.kind == EventKind.CREDENTIAL_AUTHENTICATED
+        and isinstance(event.attributes.get("participant_guid"), str)
+    ]
+    guid_actors: dict[str, set[str]] = defaultdict(set)
+    actor_guids: dict[str, set[str]] = defaultdict(set)
+    actor_sequences: dict[str, list[int]] = defaultdict(list)
+    for sequence, event in authenticated:
+        guid = str(event.attributes["participant_guid"])
+        guid_actors[guid].add(event.actor)
+        actor_guids[event.actor].add(guid)
+        actor_sequences[event.actor].append(sequence)
+
+    artifacts: list[RuntimeArtifact] = []
+    collided_actors: set[str] = set()
+    for actors in guid_actors.values():
+        if len(actors) > 1:
+            collided_actors.update(actors)
+    if collided_actors:
+        seeds = [
+            sequence
+            for sequence, event in authenticated
+            if event.actor in collided_actors
+        ]
+        artifacts.append(
+            _make_artifact(
+                evidence=evidence,
+                family="identity_guid_binding",
+                title="One observed participant identity was associated with multiple actors",
+                observation_class="boundary_binding",
+                outcome="cross_actor_binding",
+                actors=collided_actors,
+                resources=(),
+                seed_events=seeds,
+                execution_complete=execution_complete,
+                observations={
+                    "colliding_guid_count": sum(len(actors) > 1 for actors in guid_actors.values()),
+                    "actor_count": len(collided_actors),
+                },
+                signature=(
+                    "identity_binding:cross_actor",
+                    *(f"actor:{actor}" for actor in sorted(collided_actors)),
+                ),
+            )
+        )
+    for actor, guids in actor_guids.items():
+        if len(guids) <= 1:
+            continue
+        reconnects = [
+            sequence
+            for sequence, event in indexed
+            if event.actor == actor and event.kind == EventKind.PARTICIPANT_RECONNECTED
+        ]
+        outcome = "rebound_after_reconnect" if reconnects else "multiple_bindings_observed"
+        artifacts.append(
+            _make_artifact(
+                evidence=evidence,
+                family="identity_guid_binding",
+                title="An actor was observed with multiple participant identity epochs",
+                observation_class="boundary_binding",
+                outcome=outcome,
+                actors=(actor,),
+                resources=(),
+                seed_events=(*actor_sequences[actor], *reconnects),
+                execution_complete=execution_complete,
+                observations={"observed_guid_count": len(guids)},
+                signature=(f"identity_binding:{actor}:{outcome}",),
+            )
+        )
+    return artifacts
+
+
+def _post_revocation_capability_artifacts(
+    evidence: EvidenceBundle,
+    execution_complete: bool,
+) -> list[RuntimeArtifact]:
+    indexed = [(_sequence(event, index), event) for index, event in enumerate(evidence.events)]
+    capability_kinds = {
+        EventKind.DECRYPT_CAPABILITY,
+        EventKind.FORGE_CAPABILITY,
+        EventKind.PROTECTED_MESSAGE_ACCEPTED,
+    }
+    artifacts: list[RuntimeArtifact] = []
+    for revoked_sequence, revoked in indexed:
+        if revoked.kind not in (EventKind.CREDENTIAL_REVOKED, EventKind.AUTHORITY_REVOKED):
+            continue
+        observed = [
+            (sequence, event)
+            for sequence, event in indexed
+            if sequence > revoked_sequence
+            and event.actor == revoked.actor
+            and event.kind in capability_kinds
+        ]
+        if not observed:
+            continue
+        kinds = sorted({str(event.kind) for _, event in observed})
+        artifacts.append(
+            _make_artifact(
+                evidence=evidence,
+                family="post_revocation_capability",
+                title="A cryptographic capability was observed after a revocation boundary",
+                observation_class="boundary_capability",
+                outcome="observed_after_revocation",
+                actors=(revoked.actor,),
+                resources=(),
+                seed_events=(revoked_sequence, *(sequence for sequence, _ in observed)),
+                execution_complete=execution_complete,
+                observations={
+                    "revocation_kind": str(revoked.kind),
+                    "capability_event_count": len(observed),
+                    "capability_kinds": kinds,
+                },
+                signature=(
+                    f"revocation:{revoked.kind}:{revoked.actor}",
+                    *(f"post_revocation:{kind}" for kind in kinds),
+                ),
+            )
+        )
+    return artifacts
+
+
+def _delivery_cardinality_artifacts(
+    evidence: EvidenceBundle,
+    execution_complete: bool,
+) -> list[RuntimeArtifact]:
+    indexed = [(_sequence(event, index), event) for index, event in enumerate(evidence.events)]
+    artifacts: list[RuntimeArtifact] = []
+    for sequence, event in indexed:
+        if event.kind != EventKind.APPLICATION_OBSERVATION_WINDOW:
+            continue
+        expected = event.attributes.get("expected_samples")
+        observed = event.attributes.get("observed_samples")
+        if not isinstance(expected, int) or not isinstance(observed, int):
+            continue
+        outcome = "exact" if observed == expected else "missing" if observed < expected else "excess"
+        related = [
+            candidate_sequence
+            for candidate_sequence, candidate in indexed
+            if candidate_sequence <= sequence
+            and candidate.kind in (
+                EventKind.APPLICATION_SAMPLE_WRITTEN,
+                EventKind.APPLICATION_SAMPLE_RECEIVED,
+                EventKind.TRANSPORT_DATAGRAM_REPLAYED,
+                EventKind.CREDENTIAL_REVOKED,
+            )
+        ][-8:]
+        topic = event.attributes.get("topic")
+        artifacts.append(
+            _make_artifact(
+                evidence=evidence,
+                family="delivery_cardinality",
+                title="An observation window measured application delivery cardinality",
+                observation_class="boundary_cardinality",
+                outcome=outcome,
+                actors=(event.actor,),
+                resources=(topic,) if isinstance(topic, str) else (),
+                seed_events=(*related, sequence),
+                execution_complete=execution_complete,
+                observations={
+                    "expected_bucket": "zero" if expected == 0 else "one" if expected == 1 else "many",
+                    "observed_bucket": "zero" if observed == 0 else "one" if observed == 1 else "many",
+                    "delta_sign": 0 if observed == expected else -1 if observed < expected else 1,
+                },
+                signature=(
+                    f"delivery_cardinality:{event.actor}:{outcome}",
+                    f"expected:{'zero' if expected == 0 else 'one' if expected == 1 else 'many'}",
+                    f"observed:{'zero' if observed == 0 else 'one' if observed == 1 else 'many'}",
+                ),
+            )
+        )
+    return artifacts
+
+
 def _diagnostic_artifacts(
     evidence: EvidenceBundle,
     execution_complete: bool,
@@ -662,6 +908,10 @@ def discover_artifacts(
         *_revocation_artifacts(scenario, evidence, complete),
         *_replay_artifacts(evidence, complete),
         *_key_epoch_artifacts(evidence, complete),
+        *_key_recipient_artifacts(evidence, complete),
+        *_identity_binding_artifacts(evidence, complete),
+        *_post_revocation_capability_artifacts(evidence, complete),
+        *_delivery_cardinality_artifacts(evidence, complete),
         *_diagnostic_artifacts(evidence, complete),
         *_boundary_episodes(evidence, complete),
     ]
@@ -689,22 +939,89 @@ def discover_artifacts(
 
 
 def behavior_projection(evidence: EvidenceBundle) -> Mapping[str, int]:
-    """Create a stable, count-bucketed projection for differential discovery."""
+    """Create a partial-order projection for differential discovery."""
 
-    counts = Counter(semantic_state(event) for event in evidence.events)
-    projected: dict[str, int] = {}
-    for state, count in counts.items():
-        projected[f"state:{state}"] = 1 if count == 1 else 2
-    coverage = extract_runtime_coverage(evidence)
-    for transition in coverage.transitions:
-        projected[f"transition:{transition}"] = 1
-    for motif in coverage.motifs:
-        projected[f"motif:{motif}"] = 1
-    for milestone in coverage.milestones:
-        projected[f"milestone:{milestone}"] = 1
-    for anomaly in coverage.anomalies:
-        projected[f"anomaly:{anomaly}"] = 1
-    return projected
+    return partial_order_projection(evidence)
+
+
+def discover_matched_differential_artifacts(
+    _baseline_scenario: Scenario,
+    baselines: Iterable[EvidenceBundle],
+    current_scenario: Scenario,
+    current: EvidenceBundle,
+) -> tuple[RuntimeArtifact, ...]:
+    """Compare a mutation with replicated controls and suppress control noise."""
+
+    baseline_projections = [behavior_projection(item) for item in baselines]
+    if not baseline_projections:
+        return ()
+    all_baseline_keys = set().union(*(set(item) for item in baseline_projections))
+    modal_baseline: dict[str, int] = {}
+    noisy: set[str] = set()
+    for key in all_baseline_keys:
+        values = [item.get(key, 0) for item in baseline_projections]
+        counts = Counter(values)
+        modal_baseline[key] = counts.most_common(1)[0][0]
+        if len(counts) > 1:
+            noisy.add(key)
+
+    current_projection = behavior_projection(current)
+    keys = set(modal_baseline) | set(current_projection)
+    changed = sorted(
+        key
+        for key in keys
+        if key not in noisy and modal_baseline.get(key, 0) != current_projection.get(key, 0)
+    )
+    if not changed:
+        return ()
+    added = [key for key in changed if modal_baseline.get(key, 0) == 0]
+    removed = [key for key in changed if current_projection.get(key, 0) == 0]
+    count_changed = [
+        key
+        for key in changed
+        if modal_baseline.get(key, 0) and current_projection.get(key, 0)
+    ]
+    event_sequences = [
+        _sequence(event, index)
+        for index, event in enumerate(current.events)
+        if f"state:{semantic_state(event)}" in changed or event.kind in _BOUNDARY_KINDS
+    ]
+    digest_input = json.dumps(
+        {"baseline_mode": modal_baseline, "current": current_projection},
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode()
+    artifact = _make_artifact(
+        evidence=current,
+        family="baseline_runtime_divergence",
+        title="A mutation changed the partial-order runtime projection beyond control noise",
+        observation_class="baseline_differential",
+        outcome="different",
+        actors={event.actor for event in current.events},
+        resources=tuple(current_scenario.topics),
+        seed_events=event_sequences,
+        execution_complete=_execution_complete(current_scenario, current),
+        observations={
+            "baseline_sample_count": len(baseline_projections),
+            "baseline_noise_feature_count": len(noisy),
+            "effect_feature_count": len(changed),
+            "control_quality": "replicated" if len(baseline_projections) >= 3 else "limited",
+            "added_feature_count": len(added),
+            "removed_feature_count": len(removed),
+            "count_changed_feature_count": len(count_changed),
+            "added_features": added[:64],
+            "removed_features": removed[:64],
+            "count_changed_features": count_changed[:64],
+            "projection_pair_sha256": hashlib.sha256(digest_input).hexdigest(),
+        },
+        signature=(
+            "partial_order_runtime_projection",
+            *(f"added:{item}" for item in added[:16]),
+            *(f"removed:{item}" for item in removed[:16]),
+            *(f"count_changed:{item}" for item in count_changed[:16]),
+        ),
+    )
+    return (artifact,)
 
 
 def discover_differential_artifacts(
@@ -715,60 +1032,9 @@ def discover_differential_artifacts(
 ) -> tuple[RuntimeArtifact, ...]:
     """Describe runtime differences without deciding whether either side is vulnerable."""
 
-    baseline_projection = behavior_projection(baseline)
-    current_projection = behavior_projection(current)
-    keys = set(baseline_projection) | set(current_projection)
-    changed = sorted(
-        key
-        for key in keys
-        if baseline_projection.get(key) != current_projection.get(key)
+    return discover_matched_differential_artifacts(
+        _baseline_scenario,
+        (baseline,),
+        current_scenario,
+        current,
     )
-    if not changed:
-        return ()
-    added = [key for key in changed if key not in baseline_projection]
-    removed = [key for key in changed if key not in current_projection]
-    count_changed = [
-        key
-        for key in changed
-        if key in baseline_projection and key in current_projection
-    ]
-    event_sequences = [
-        _sequence(event, index)
-        for index, event in enumerate(current.events)
-        if f"state:{semantic_state(event)}" in changed or event.kind in _BOUNDARY_KINDS
-    ]
-    digest_input = json.dumps(
-        {
-            "baseline": baseline_projection,
-            "current": current_projection,
-        },
-        sort_keys=True,
-        separators=(",", ":"),
-    ).encode()
-    artifact = _make_artifact(
-        evidence=current,
-        family="baseline_runtime_divergence",
-        title="A schedule or semantic mutation changed the runtime behavior projection",
-        observation_class="baseline_differential",
-        outcome="different",
-        actors={event.actor for event in current.events},
-        resources=tuple(current_scenario.topics),
-        seed_events=event_sequences,
-        execution_complete=_execution_complete(current_scenario, current),
-        observations={
-            "added_feature_count": len(added),
-            "removed_feature_count": len(removed),
-            "count_changed_feature_count": len(count_changed),
-            "added_features": added[:64],
-            "removed_features": removed[:64],
-            "count_changed_features": count_changed[:64],
-            "projection_pair_sha256": hashlib.sha256(digest_input).hexdigest(),
-        },
-        signature=(
-            "baseline_runtime_projection",
-            *(f"added:{item}" for item in added[:16]),
-            *(f"removed:{item}" for item in removed[:16]),
-            *(f"count_changed:{item}" for item in count_changed[:16]),
-        ),
-    )
-    return (artifact,)

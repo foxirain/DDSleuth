@@ -22,6 +22,7 @@ from .explorer import analyze_exploration
 from .oracles.evaluate import evaluate
 from .policy import materialize_policies
 from .reporting import concise_summary, write_report
+from .reduction import causal_action_prefilter
 from .scenario import ScenarioError, load_scenario
 from .trajectory import write_trajectory_manifest
 
@@ -285,6 +286,7 @@ def _cmd_explore(args: argparse.Namespace) -> int:
         spacings_ms=args.spacing_ms or (0, 25, 250),
         barrier_modes=args.barrier_mode or ("preserve", "relaxed"),
         action_jitters_ms=args.action_jitter_ms or (0, 10, 50),
+        boundary_offsets_ms=args.boundary_offset_ms or (0, -50, -10, 10, 50),
         budget=pool_size,
         execution_budget=args.budget,
         seed=args.seed,
@@ -304,10 +306,17 @@ def _cmd_explore(args: argparse.Namespace) -> int:
         identity_config=identity_config,
         allow_unbound_configuration=args.allow_unbound_configuration,
         repetitions=args.repetitions,
+        baseline_repetitions=args.baseline_repetitions,
+        confirmation_repetitions=args.confirmation_repetitions,
         selection_strategy=args.strategy,
         execution_budget=execution_budget,
         selection_seed=args.seed,
         plateau_window=args.plateau_window,
+        corpus_path=(
+            Path(args.corpus)
+            if args.corpus
+            else output_root / "artifact-corpus.json"
+        ),
     )
     exploration_path = output_root / "exploration-report.json"
     exploration = analyze_exploration(
@@ -320,7 +329,10 @@ def _cmd_explore(args: argparse.Namespace) -> int:
     print(f"trials={exploration['expected_trials']}")
     print(f"analyzed={exploration['analyzed_trials']}")
     print(f"artifact_clusters={exploration['artifact_cluster_count']}")
+    print(f"semantic_artifact_clusters={exploration['semantic_artifact_cluster_count']}")
+    print(f"context_clusters={exploration['context_cluster_count']}")
     print(f"mutation_only_artifacts={exploration['mutation_only_artifact_clusters']}")
+    print(f"confirmed_artifacts={exploration['confirmed_artifact_clusters']}")
     print(f"report={exploration_path}")
     if campaign.counts["error"]:
         return 3
@@ -340,6 +352,21 @@ def _cmd_analyze_exploration(args: argparse.Namespace) -> int:
     print(f"artifact_clusters={report['artifact_cluster_count']}")
     print(f"novel_artifacts={report['novel_artifact_clusters']}")
     print(f"output={args.output}")
+    return 0
+
+
+def _cmd_plan_reduction(args: argparse.Namespace) -> int:
+    scenario = load_scenario(args.scenario)
+    evidence = load_evidence(args.evidence)
+    artifacts = discover_artifacts(scenario, evidence).artifacts
+    artifact = next(
+        (item for item in artifacts if item.fingerprint == args.fingerprint),
+        None,
+    )
+    if artifact is None:
+        raise ValueError("target fingerprint is not present in the supplied evidence")
+    plan = causal_action_prefilter(scenario.raw, evidence, artifact)
+    _write_or_print_json(plan, args.output)
     return 0
 
 
@@ -494,6 +521,10 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     explore.add_argument("--seed", type=int, default=0)
     explore.add_argument(
+        "--corpus",
+        help="persistent cross-run artifact corpus (default: OUTPUT_ROOT/artifact-corpus.json)",
+    )
+    explore.add_argument(
         "--plateau-window",
         type=int,
         default=20,
@@ -510,6 +541,12 @@ def _build_parser() -> argparse.ArgumentParser:
         action="append",
         type=int,
         help="stable per-action timing perturbation included in the trajectory pool",
+    )
+    explore.add_argument(
+        "--boundary-offset-ms",
+        action="append",
+        type=int,
+        help="shift only revoke/rekey/reconnect/lifecycle/transport actions",
     )
     explore.add_argument("--dimension", action="append", default=[])
     explore.add_argument(
@@ -529,6 +566,18 @@ def _build_parser() -> argparse.ArgumentParser:
         help=argparse.SUPPRESS,
     )
     explore.add_argument("--repetitions", type=int, default=1)
+    explore.add_argument(
+        "--baseline-repetitions",
+        type=int,
+        default=3,
+        help="repeat matched control trajectories to measure normal runtime variance",
+    )
+    explore.add_argument(
+        "--confirmation-repetitions",
+        type=int,
+        default=2,
+        help="automatically rerun an exact trajectory when it yields a new semantic artifact",
+    )
     explore.add_argument("--materialize-policies", action="store_true")
     explore.add_argument("--materialize-identities", action="store_true")
     explore.add_argument(
@@ -553,6 +602,16 @@ def _build_parser() -> argparse.ArgumentParser:
     analyze.add_argument("--campaign-report", required=True)
     analyze.add_argument("--output", required=True)
     analyze.set_defaults(handler=_cmd_analyze_exploration)
+
+    reduce_plan = subparsers.add_parser(
+        "plan-reduction",
+        help="build a causal action prefilter for later artifact-preserving ddmin",
+    )
+    reduce_plan.add_argument("scenario")
+    reduce_plan.add_argument("evidence")
+    reduce_plan.add_argument("fingerprint")
+    reduce_plan.add_argument("--output")
+    reduce_plan.set_defaults(handler=_cmd_plan_reduction)
     return parser
 
 

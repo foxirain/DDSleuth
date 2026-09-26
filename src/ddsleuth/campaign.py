@@ -10,9 +10,13 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from .adapters.fastdds import FastDDSAdapter
-from .artifacts import discover_artifacts, write_artifacts
+from .artifacts import (
+    discover_artifacts,
+    discover_matched_differential_artifacts,
+    write_artifacts,
+)
 from .campaign_types import ManifestCase
-from .evidence import load_evidence, write_evidence
+from .evidence import EvidenceBundle, load_evidence, write_evidence
 from .identity import IdentityArtifacts, materialize_identities
 from .models import JsonValue, Scenario
 from .oracles.evaluate import EvaluationReport, evaluate
@@ -93,6 +97,7 @@ class CampaignReport:
     cases: tuple[CampaignCaseResult, ...]
     scenario_summaries: tuple[Mapping[str, JsonValue], ...]
     selection: Mapping[str, JsonValue] | None = None
+    confirmation: Mapping[str, JsonValue] | None = None
 
     def to_dict(self) -> dict[str, JsonValue]:
         value: dict[str, JsonValue] = {
@@ -107,12 +112,26 @@ class CampaignReport:
         }
         if self.selection is not None:
             value["selection"] = dict(self.selection)
+        if self.confirmation is not None:
+            value["confirmation"] = dict(self.confirmation)
         return value
 
 
 def _canonical_digest(value: Mapping[str, Any]) -> str:
     encoded = json.dumps(value, sort_keys=True, separators=(",", ":")).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
+
+
+def _semantic_assignment_key(
+    assignments: Mapping[str, JsonValue],
+) -> tuple[tuple[str, str], ...]:
+    return tuple(
+        sorted(
+            (name, json.dumps(value, sort_keys=True, separators=(",", ":")))
+            for name, value in assignments.items()
+            if not name.startswith("trajectory.")
+        )
+    )
 
 
 def _require_string(value: Any, context: str) -> str:
@@ -178,10 +197,13 @@ def load_campaign_report(path: str | Path) -> CampaignReport:
     counts = raw.get("counts", {})
     summaries = raw.get("scenario_summaries", [])
     selection = raw.get("selection")
+    confirmation = raw.get("confirmation")
     if not isinstance(counts, Mapping) or not isinstance(summaries, list):
         raise CampaignError("campaign report counts or scenario_summaries are invalid")
     if selection is not None and not isinstance(selection, Mapping):
         raise CampaignError("campaign report selection must be an object")
+    if confirmation is not None and not isinstance(confirmation, Mapping):
+        raise CampaignError("campaign report confirmation must be an object")
     return CampaignReport(
         schema_version=int(raw.get("schema_version", 0)),
         manifest_digest=_require_string(raw.get("manifest_digest"), "manifest_digest"),
@@ -194,6 +216,7 @@ def load_campaign_report(path: str | Path) -> CampaignReport:
             dict(value) for value in summaries if isinstance(value, Mapping)
         ),
         selection=dict(selection) if selection is not None else None,
+        confirmation=dict(confirmation) if confirmation is not None else None,
     )
 
 
@@ -374,7 +397,7 @@ def _wilson_interval(successes: int, trials: int) -> tuple[float, float] | None:
 def _scenario_summaries(
     cases: tuple[ManifestCase, ...],
     results: list[CampaignCaseResult],
-    repetitions: int,
+    expected_trials: int | Mapping[int, int],
 ) -> tuple[Mapping[str, JsonValue], ...]:
     summaries: list[Mapping[str, JsonValue]] = []
     for case in cases:
@@ -389,12 +412,17 @@ def _scenario_summaries(
             "error" if result.status == "error" else result.verdict
             for result in trials
         }
+        expected = (
+            int(expected_trials.get(case.index, 0))
+            if isinstance(expected_trials, Mapping)
+            else expected_trials
+        )
         summaries.append(
             {
                 "scenario_id": case.scenario_id,
                 "scenario_digest": case.scenario_digest,
                 "assignments": dict(case.assignments),
-                "expected_trials": repetitions,
+                "expected_trials": expected,
                 "observed_trials": len(trials),
                 "pass": passes,
                 "violation": violations,
@@ -563,10 +591,13 @@ def run_campaign(
     identity_config: IdentityMaterializationConfig | None = None,
     allow_unbound_configuration: bool = False,
     repetitions: int = 1,
+    baseline_repetitions: int | None = None,
+    confirmation_repetitions: int = 0,
     selection_strategy: str = "manifest",
     execution_budget: int | None = None,
     selection_seed: int = 0,
     plateau_window: int = 0,
+    corpus_path: Path | None = None,
 ) -> CampaignReport:
     if overwrite and resume:
         raise CampaignError("--overwrite and --resume are mutually exclusive")
@@ -574,6 +605,12 @@ def run_campaign(
         raise CampaignError("generated identities and explicit policy configuration are mutually exclusive")
     if repetitions <= 0 or repetitions > 1000:
         raise CampaignError("repetitions must be between 1 and 1000")
+    if baseline_repetitions is None:
+        baseline_repetitions = repetitions
+    if baseline_repetitions < repetitions or baseline_repetitions > 1000:
+        raise CampaignError("baseline repetitions must be between repetitions and 1000")
+    if confirmation_repetitions < 0 or confirmation_repetitions > 100:
+        raise CampaignError("confirmation repetitions must be between 0 and 100")
     if plateau_window < 0:
         raise CampaignError("plateau window must be non-negative")
     manifest_digest, cases = load_manifest(manifest_path)
@@ -598,20 +635,39 @@ def run_campaign(
     scheduler = None
     pending = list(cases)
     selected_cases: list[ManifestCase] = []
+    seen_specific_artifacts: set[str] = set()
+    confirmation_cases: list[dict[str, JsonValue]] = []
+    expected_trials_by_case: dict[int, int] = {}
+    baseline_evidence: dict[
+        tuple[tuple[str, str], ...],
+        list[tuple[Scenario, EvidenceBundle]],
+    ] = {}
     if selection_strategy in ("artifact-guided", "coverage-guided"):
         from .coverage import ArtifactGuidedScheduler
 
-        scheduler = ArtifactGuidedScheduler(cases, seed=selection_seed)
+        scheduler = ArtifactGuidedScheduler(cases, seed=selection_seed, corpus_path=corpus_path)
 
     while pending and len(selected_cases) < execution_budget:
         case = scheduler.choose(pending) if scheduler is not None else pending[0]
         pending.remove(case)
         selected_cases.append(case)
         case_evidence = []
-        for repetition in range(repetitions):
+        baseline_case = (
+            case.assignments.get("trajectory.barrier_mode") == "preserve"
+            and case.assignments.get("trajectory.spacing_ms") == 0
+            and case.assignments.get("trajectory.action_jitter_ms", 0) == 0
+            and case.assignments.get("trajectory.boundary_offset_ms", 0) == 0
+        )
+        initial_repetitions = baseline_repetitions if baseline_case else repetitions
+        planned_repetitions = initial_repetitions
+        maximum_repetitions = initial_repetitions + confirmation_repetitions
+        case_specific_artifacts: set[str] = set()
+        repetition = 0
+        while repetition < planned_repetitions:
             started = time.monotonic()
-            run_dir = _case_directory(run_root, case, repetition, repetitions)
+            run_dir = _case_directory(run_root, case, repetition, maximum_repetitions)
             binding_mode = "external_unverified"
+            artifact_bundle = None
             try:
                 scenario = _validate_case(case)
                 if scenario.implementation != adapter.name:
@@ -644,10 +700,8 @@ def run_campaign(
                         )
                     report = evaluate(scenario, evidence)
                     write_report(report, report_path)
-                    write_artifacts(
-                        discover_artifacts(scenario, evidence),
-                        run_dir / "artifacts.json",
-                    )
+                    artifact_bundle = discover_artifacts(scenario, evidence)
+                    write_artifacts(artifact_bundle, run_dir / "artifacts.json")
                     result = _result_from_report(
                         case,
                         report,
@@ -734,10 +788,8 @@ def run_campaign(
                     write_evidence(evidence, evidence_path)
                     report = evaluate(scenario, evidence)
                     write_report(report, report_path)
-                    write_artifacts(
-                        discover_artifacts(scenario, evidence),
-                        run_dir / "artifacts.json",
-                    )
+                    artifact_bundle = discover_artifacts(scenario, evidence)
+                    write_artifacts(artifact_bundle, run_dir / "artifacts.json")
                     result = _result_from_report(
                         case,
                         report,
@@ -750,6 +802,15 @@ def run_campaign(
                     )
                 if result.status == "completed":
                     case_evidence.append(evidence)
+                    if artifact_bundle is not None:
+                        case_specific_artifacts.update(
+                            item.fingerprint
+                            for item in artifact_bundle.artifacts
+                            if item.family not in (
+                                "boundary_episode",
+                                "instrumentation_divergence",
+                            )
+                        )
             except (OSError, ValueError, RuntimeError) as error:
                 result = _error_result(
                     case,
@@ -762,9 +823,41 @@ def run_campaign(
                 )
             _write_case_result(result, run_dir)
             results.append(result)
+            if repetition + 1 == initial_repetitions:
+                semantic_key = _semantic_assignment_key(case.assignments)
+                if baseline_case and case_evidence:
+                    baseline_evidence.setdefault(semantic_key, []).extend(
+                        (scenario, item) for item in case_evidence
+                    )
+                elif case_evidence and semantic_key in baseline_evidence:
+                    controls = baseline_evidence[semantic_key]
+                    for item in case_evidence:
+                        case_specific_artifacts.update(
+                            artifact.fingerprint
+                            for artifact in discover_matched_differential_artifacts(
+                                controls[0][0],
+                                (control[1] for control in controls),
+                                scenario,
+                                item,
+                            )
+                        )
+                newly_observed = sorted(case_specific_artifacts - seen_specific_artifacts)
+                seen_specific_artifacts.update(case_specific_artifacts)
+                if newly_observed and confirmation_repetitions:
+                    planned_repetitions += confirmation_repetitions
+                    confirmation_cases.append(
+                        {
+                            "case_index": case.index,
+                            "scenario_id": case.scenario_id,
+                            "trigger_fingerprints": newly_observed,
+                            "additional_trials": confirmation_repetitions,
+                        }
+                    )
+            repetition += 1
             if stop_on_error and result.status == "error":
                 stopped = True
                 break
+        expected_trials_by_case[case.index] = planned_repetitions
         if scheduler is not None:
             scheduler.observe(case, case_evidence)
             if scheduler.plateau_reached(plateau_window):
@@ -772,7 +865,9 @@ def run_campaign(
         if stopped:
             break
 
-    trial_count = execution_budget * repetitions
+    trial_count = execution_budget * repetitions + sum(
+        planned - repetitions for planned in expected_trials_by_case.values()
+    )
     counts = {
         "completed": sum(result.status == "completed" for result in results),
         "error": sum(result.status == "error" for result in results),
@@ -789,15 +884,30 @@ def run_campaign(
         trial_count=trial_count,
         counts=counts,
         cases=tuple(results),
-        scenario_summaries=_scenario_summaries(tuple(selected_cases), results, repetitions),
+        scenario_summaries=_scenario_summaries(
+            tuple(selected_cases),
+            results,
+            expected_trials_by_case,
+        ),
         selection=(
             scheduler.summary(len(cases), execution_budget)
             if scheduler is not None
             else None
         ),
+        confirmation={
+            "baseline_repetitions": baseline_repetitions,
+            "confirmation_repetitions": confirmation_repetitions,
+            "confirmed_case_count": len(confirmation_cases),
+            "additional_trials": sum(
+                int(item["additional_trials"]) for item in confirmation_cases
+            ),
+            "cases": confirmation_cases,
+        },
     )
     summary_path.write_text(
         json.dumps(campaign.to_dict(), indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
     )
+    if scheduler is not None:
+        scheduler.save_corpus()
     return campaign

@@ -1,16 +1,19 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "urn:ddsleuth:schema:exploration-report:v2",
+  "$id": "urn:ddsleuth:schema:exploration-report:v3",
   "title": "DDSleuth runtime artifact exploration report",
   "type": "object",
   "required": [
     "schema_version", "exploration_kind", "manifest", "generated_trajectories",
     "expected_trials", "analyzed_trials", "complete_trials", "infrastructure_errors",
     "artifact_cluster_count", "novel_artifact_clusters",
-    "mutation_only_artifact_clusters", "artifact_clusters"
+    "mutation_only_artifact_clusters", "confirmed_artifact_clusters",
+    "context_cluster_count", "semantic_artifact_cluster_count",
+    "control_groups", "replicated_control_groups",
+    "control_noise_features_suppressed", "artifact_clusters"
   ],
   "properties": {
-    "schema_version": { "const": 2 },
+    "schema_version": { "const": 3 },
     "exploration_kind": { "const": "stateful_runtime_artifact_discovery" },
     "manifest": { "type": "string" },
     "base_scenario": { "type": ["string", "null"] },
@@ -23,8 +26,14 @@
     "complete_trials": { "type": "integer", "minimum": 0 },
     "infrastructure_errors": { "type": "integer", "minimum": 0 },
     "artifact_cluster_count": { "type": "integer", "minimum": 0 },
+    "context_cluster_count": { "type": "integer", "minimum": 0 },
+    "semantic_artifact_cluster_count": { "type": "integer", "minimum": 0 },
     "novel_artifact_clusters": { "type": "integer", "minimum": 0 },
     "mutation_only_artifact_clusters": { "type": "integer", "minimum": 0 },
+    "confirmed_artifact_clusters": { "type": "integer", "minimum": 0 },
+    "control_groups": { "type": "integer", "minimum": 0 },
+    "replicated_control_groups": { "type": "integer", "minimum": 0 },
+    "control_noise_features_suppressed": { "type": "integer", "minimum": 0 },
     "artifact_clusters": {
       "type": "array",
       "items": {
@@ -33,6 +42,7 @@
           "artifact_id", "fingerprint", "family", "title", "observation_class",
           "outcome", "research_priority", "novelty", "reproducibility",
           "reproducibility_observed", "reproduction_occurrences", "reproduction_trials",
+          "population_support", "confirmed", "context_only",
           "semantic_prevalence", "baseline_divergence", "boundary_depth",
           "evidence_quality", "occurrences", "analyzed_trials", "occurrence_rate",
           "complete_occurrences", "schedule_sensitive", "semantic_configuration_count",
@@ -52,6 +62,9 @@
           "reproducibility_observed": { "type": "number", "minimum": 0, "maximum": 1 },
           "reproduction_occurrences": { "type": "integer", "minimum": 0 },
           "reproduction_trials": { "type": "integer", "minimum": 0 },
+          "population_support": { "type": "number", "minimum": 0, "maximum": 1 },
+          "confirmed": { "type": "boolean" },
+          "context_only": { "type": "boolean" },
           "semantic_prevalence": { "type": "number", "minimum": 0, "maximum": 1 },
           "baseline_divergence": { "type": "number", "minimum": 0, "maximum": 1 },
           "boundary_depth": { "type": "integer", "minimum": 0 },

@@ -64,8 +64,8 @@ downstream analysis determines whether an artifact is a vulnerability.
   explicit revocation-driven rekey evidence, replay, and controlled transport faults.
 - [x] Runtime coverage feedback over semantic states and transitions rather than source
   lines, with bounded pool selection and an auditable selection trace.
-- [x] Replace cross-process adjacency with actor-local and shared-identifier causal
-  coverage, actor-local motifs, boundary-depth scoring, and artifact guidance.
+- [x] Replace cross-process adjacency with shared-identifier partial-order coverage,
+  boundary-depth scoring, and semantic artifact guidance.
 - [x] Fail closed when a requested transport mutation was not applied, force Fast DDS
   transport experiments onto UDP, and bind replay to an explicit captured wire image.
 - [x] Add post-attack observation windows, coverage-plateau termination, and bounded
@@ -75,14 +75,20 @@ downstream analysis determines whether an artifact is a vulnerability.
 - [x] Add bounded causal slices and count-bucketed baseline behavior differentials.
 - [x] Separate novelty, reproducibility, semantic prevalence, baseline divergence,
   boundary depth, and evidence quality in the exploration report.
+- [x] Add replicated matched controls, control-noise suppression, selective semantic
+  artifact confirmation, and separate context/semantic cluster accounting.
+- [x] Add key-recipient topology, identity epoch, delivery-cardinality, and
+  post-revocation capability artifacts.
 
 ### M3.6 — Artifact minimization and adaptive mutation
 
-- Add automatic trajectory delta debugging for mutation-only artifacts.
+- [x] Add execution-verified action-plan delta debugging and a causal prefilter.
+- Feed minimized scenarios automatically back into the active campaign queue.
 - Learn action-window mutations from observed boundary intervals rather than fixed jitter alone.
-- Add partial-order reduction for independent actor actions.
+- [x] Add fixed boundary-focused offsets as the precursor to learned action windows.
+- [x] Add partial-order reduction for independent actor and callback ordering.
 - Add sequence-aware transport targeting for RTPS submessage classes.
-- Add cross-run cluster persistence and corpus deduplication.
+- [x] Add cross-run semantic-feature persistence and corpus deduplication.
 - Add deterministic campaign checkpoint/resume for scheduler state.
 
 ### M4 — Second implementation
