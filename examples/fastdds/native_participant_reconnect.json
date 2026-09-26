@@ -37,7 +37,8 @@
   "assertions": [
     {"id": "INV-OBSERVER-01", "oracle": "observer_health", "parameters": {}},
     {"id": "INV-POLICY-01", "oracle": "policy_authorization_consistency", "parameters": {}},
-    {"id": "INV-ROUTE-01", "oracle": "crypto_token_transport_consistency", "parameters": {"require_all_generated": true}}
+    {"id": "INV-ROUTE-01", "oracle": "crypto_token_transport_consistency", "parameters": {"require_all_generated": true}},
+    {"id": "INV-LIFECYCLE-01", "oracle": "endpoint_key_lifecycle", "parameters": {"actor": "writer", "token_class": "datawriter", "endpoint_class": "user", "observation_phase": "generated"}}
   ],
   "execution": {
     "network": "loopback",

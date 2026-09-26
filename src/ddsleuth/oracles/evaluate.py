@@ -151,19 +151,24 @@ def evaluate(scenario: Scenario, evidence: EvidenceBundle) -> EvaluationReport:
 
     failed_processes: dict[str, int] = {}
     exited_processes: set[str] = set()
+    diverged_processes: set[str] = set()
     for event in evidence.events:
         if event.kind == EventKind.PROCESS_EXIT:
             exited_processes.add(event.actor)
             if event.outcome == "failed":
                 exit_code = event.attributes.get("exit_code")
                 failed_processes[event.actor] = exit_code if isinstance(exit_code, int) else -1
+        elif event.kind == EventKind.EXECUTION_DIVERGENCE:
+            diverged_processes.add(event.actor)
 
     expected_processes = (
         {role.actor for role in scenario.execution.roles}
         if scenario.execution is not None
         else set()
     )
-    incomplete_processes = tuple(sorted(expected_processes - exited_processes))
+    incomplete_processes = tuple(
+        sorted((expected_processes - exited_processes) | diverged_processes)
+    )
 
     if any(result.status == OracleStatus.VIOLATION for result in results):
         verdict = "violation"

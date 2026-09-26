@@ -4,7 +4,6 @@ import copy
 import hashlib
 import itertools
 import json
-import random
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -243,20 +242,57 @@ def generate_trajectories(
     if not candidates:
         raise TrajectoryError("the exploration configuration generated no trajectories")
 
-    # Keep all baselines first. The remaining budget is a deterministic seeded
-    # sample over schedule and semantic mutations, not insertion-order truncation.
-    candidates.sort(key=lambda item: (not item[2], item[3]))
-    if len(candidates) > budget:
-        baselines = [item for item in candidates if item[2]]
-        non_baselines = [item for item in candidates if not item[2]]
-        if len(baselines) >= budget:
-            selected = baselines[:budget]
-        else:
-            random.Random(seed).shuffle(non_baselines)
-            selected = baselines + non_baselines[: budget - len(baselines)]
-            selected.sort(key=lambda item: (not item[2], item[3]))
+    # Allocate the bounded pool by semantic configuration, pairing a control
+    # with at least one schedule mutation before adding more variants.  Keeping
+    # every semantic baseline first can fill the entire pool with controls and
+    # leave no dynamic experiment for the runtime scheduler.
+    groups: dict[str, list[tuple[dict[str, Any], dict[str, JsonValue], bool, str]]] = {}
+    for item in candidates:
+        semantic = {
+            name: value
+            for name, value in item[1].items()
+            if not name.startswith("trajectory.")
+        }
+        group_key = _descriptor_digest({"seed": seed, "semantic": semantic})
+        groups.setdefault(group_key, []).append(item)
+    ordered_groups = sorted(groups.items())
+    for _, items in ordered_groups:
+        items.sort(key=lambda item: (not item[2], item[3]))
+
+    selected: list[tuple[dict[str, Any], dict[str, JsonValue], bool, str]] = []
+    if len(candidates) <= budget:
+        selected = sorted(candidates, key=lambda item: (not item[2], item[3]))
     else:
-        selected = candidates
+        # First pass: one baseline and one mutation per chosen semantic config.
+        for _, items in ordered_groups:
+            baseline = next((item for item in items if item[2]), items[0])
+            selected.append(baseline)
+            if len(selected) >= budget:
+                break
+            mutation = next((item for item in items if not item[2]), None)
+            if mutation is not None:
+                selected.append(mutation)
+            if len(selected) >= budget:
+                break
+        # Second pass: deterministic round-robin over remaining mutations.
+        depth = 1
+        while len(selected) < budget:
+            added = False
+            for _, items in ordered_groups:
+                mutations = [item for item in items if not item[2]]
+                if depth < len(mutations):
+                    selected.append(mutations[depth])
+                    added = True
+                    if len(selected) >= budget:
+                        break
+            if not added:
+                break
+            depth += 1
+
+    # This marker is for scheduler seeding only. Every semantic configuration
+    # may still have its own differential-analysis baseline.
+    for index, item in enumerate(selected):
+        item[1]["trajectory.scheduler_seed"] = index == 0
     return [(case, assignments) for case, assignments, _, _ in selected]
 
 

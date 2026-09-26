@@ -227,6 +227,123 @@ class CandidateTests(unittest.TestCase):
         self.assertEqual("critical_lead", candidate.risk_tier)
         self.assertEqual(99, candidate.score)
 
+    def test_replayed_sample_delivered_twice_is_a_high_lead(self) -> None:
+        scenario = self._scenario()
+        events = [
+            self._event(
+                EventKind.APPLICATION_SAMPLE_RECEIVED,
+                "bob",
+                "received",
+                topic="SecretTopic",
+                sample_index=7,
+                message="same-protected-sample",
+            ),
+            self._event(
+                EventKind.TRANSPORT_DATAGRAM_REPLAYED,
+                "alice",
+                "replayed",
+                action_id="replay",
+                fault="replay_last",
+            ),
+            self._event(
+                EventKind.APPLICATION_SAMPLE_RECEIVED,
+                "bob",
+                "received",
+                topic="SecretTopic",
+                sample_index=7,
+                message="same-protected-sample",
+            ),
+        ]
+        events.extend(
+            self._event(EventKind.PROCESS_EXIT, role.actor, "succeeded", exit_code=0)
+            for role in scenario.execution.roles
+        )
+        evidence = EvidenceBundle.create(
+            run_id="accepted-replay",
+            scenario_id=scenario.scenario_id,
+            scenario_digest=scenario.digest,
+            implementation="fastdds",
+            events=events,
+        )
+        bundle = discover_candidates(scenario, evidence, evaluate(scenario, evidence))
+        candidate = next(
+            item
+            for item in bundle.candidates
+            if item.family == "transport_replay_duplicate_delivery"
+        )
+        self.assertEqual("high_lead", candidate.risk_tier)
+        self.assertEqual(93, candidate.score)
+
+    def test_runner_divergence_cannot_be_reported_as_a_pass(self) -> None:
+        scenario = self._scenario()
+        events = [
+            self._event(
+                EventKind.EXECUTION_DIVERGENCE,
+                "alice",
+                "failed",
+                message="transport fault contract was not satisfied",
+            )
+        ]
+        events.extend(
+            self._event(EventKind.PROCESS_EXIT, role.actor, "succeeded", exit_code=0)
+            for role in scenario.execution.roles
+        )
+        evidence = EvidenceBundle.create(
+            run_id="runner-divergence",
+            scenario_id=scenario.scenario_id,
+            scenario_digest=scenario.digest,
+            implementation="fastdds",
+            events=events,
+        )
+        report = evaluate(scenario, evidence)
+        self.assertEqual("inconclusive", report.verdict)
+        self.assertIn("alice", report.incomplete_processes)
+
+    def test_sanitizer_failure_is_ranked_as_a_high_memory_safety_lead(self) -> None:
+        scenario = self._scenario()
+        events = [
+            self._event(
+                EventKind.TRANSPORT_DATAGRAM_REPLAYED,
+                "alice",
+                "replayed",
+                action_id="replay",
+                fault="replay_last",
+            ),
+            self._event(
+                EventKind.MEMORY_SAFETY_VIOLATION,
+                "bob",
+                "detected",
+                sanitizer="address",
+                violation="heap-buffer-overflow",
+            ),
+        ]
+        events.extend(
+            self._event(
+                EventKind.PROCESS_EXIT,
+                role.actor,
+                "failed" if role.actor == "bob" else "succeeded",
+                exit_code=1 if role.actor == "bob" else 0,
+            )
+            for role in scenario.execution.roles
+        )
+        evidence = EvidenceBundle.create(
+            run_id="asan-replay",
+            scenario_id=scenario.scenario_id,
+            scenario_digest=scenario.digest,
+            implementation="fastdds",
+            events=events,
+        )
+        bundle = discover_candidates(scenario, evidence, evaluate(scenario, evidence))
+        candidate = next(
+            item
+            for item in bundle.candidates
+            if item.family == "sanitizer_memory_safety_failure"
+        )
+        self.assertEqual("high_lead", candidate.risk_tier)
+        self.assertEqual(96, candidate.score)
+        self.assertEqual(0.99, candidate.confidence)
+        self.assertIn("applied_transport_mutation_preceded_failure", candidate.signals)
+
     def test_schedule_only_authorization_change_is_a_high_lead(self) -> None:
         scenario = self._scenario()
         baseline_events = [

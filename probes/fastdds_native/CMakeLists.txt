@@ -10,4 +10,4 @@ target_compile_features(ddsleuth_fastdds_probe PRIVATE cxx_std_17)
 target_compile_options(ddsleuth_fastdds_probe PRIVATE
     $<$<CXX_COMPILER_ID:GNU,Clang>:-Wall;-Wextra;-Wpedantic>)
 target_include_directories(ddsleuth_fastdds_probe PRIVATE ../common)
-target_link_libraries(ddsleuth_fastdds_probe PRIVATE fastdds fastcdr)
+target_link_libraries(ddsleuth_fastdds_probe PRIVATE fastdds fastcdr ${CMAKE_DL_LIBS})

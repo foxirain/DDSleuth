@@ -34,6 +34,17 @@ Python pre-release spelling used for packages (`0.1.0a1`) and a human-readable G
   trajectory pool, including stable order-preserving action timing jitter;
 - promote only correlated post-revocation application delivery—not a local write
   attempt—into a critical discovery lead.
+- fail closed unless every requested transport mutation emits an action-correlated
+  applied event, and force Fast DDS transport experiments away from SHM/DataSharing;
+- synchronize native transport actions with the probe and add explicit wire-image
+  capture so replay cannot silently select a later control datagram;
+- add post-attack observation windows for negative delivery evidence;
+- replace global log adjacency with actor-local and shared-identifier causal coverage,
+  weighted security milestones, frontier scoring, and plateau termination;
+- pair semantic controls with dynamic mutations so a large matrix cannot consume the
+  entire trajectory pool with baselines;
+- normalize ASan/UBSan/TSan/MSan memory failures into ranked High discovery leads;
+- preserve exact large logs as gzip while keeping compact event-complete text logs.
 
 ## 0.1.0-alpha.1 — 2026-09-26
 

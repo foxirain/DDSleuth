@@ -29,10 +29,14 @@ Each assertion returns one of three states:
 - `not_applicable`: instrumentation, configuration, or causal evidence was
   insufficient.
 
-A process failure, missing process exit, observer error, or `not_applicable` assertion
-makes the trial inconclusive. Infrastructure errors remain separate from semantic
-outcomes. Capability claims require their own events; possession of a token is not by
-itself proof of decryption, forgery, application delivery, or availability impact.
+A process failure, missing process exit, execution divergence, observer error, missing
+transport-fault acknowledgement, or `not_applicable` assertion makes the trial
+inconclusive. Infrastructure errors remain separate from semantic outcomes. Capability
+claims require their own events; possession of a token is not by itself proof of
+decryption, forgery, application delivery, or availability impact. Sanitizer-confirmed
+OOB, UAF, double-free, and related native failures are retained as memory-safety
+candidates even though the trial verdict is necessarily inconclusive; remote
+reachability and exploitability still require separate evidence.
 
 An inconclusive trial may still contain a discovery candidate. Candidate extraction
 operates on the preserved prefix of the runtime trace, records `execution_complete`,
@@ -67,7 +71,7 @@ object insertion order or ambient defaults:
 - metadata, data, RTPS, discovery, and liveliness protection kinds;
 - session-key block threshold and sample count;
 - participant disconnect/reconnect and exact credential-expiry time;
-- UDP drop, delay, duplication, and exact replay action;
+- UDP drop, delay, duplication, explicit capture, and exact replay action;
 - transport and delivery mode.
 
 All checked-in scenarios use loopback. Matrix cases that mutate security policy must

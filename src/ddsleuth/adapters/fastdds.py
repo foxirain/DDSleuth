@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import gzip
 import json
 import re
 from pathlib import Path
@@ -12,6 +13,80 @@ from ..runner import run_processes
 
 
 _ANSI_ESCAPE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+
+_SANITIZER_PATTERNS = (
+    (
+        "address",
+        re.compile(r"(?:ERROR|SUMMARY): AddressSanitizer:\s*([A-Za-z0-9_-]+)"),
+    ),
+    (
+        "thread",
+        re.compile(r"WARNING: ThreadSanitizer:\s*([^\r\n]+)"),
+    ),
+    (
+        "memory",
+        re.compile(r"WARNING: MemorySanitizer:\s*([^\r\n]+)"),
+    ),
+)
+
+_UBSAN_MEMORY_TERMS = (
+    "out of bounds",
+    "misaligned address",
+    "null pointer",
+    "pointer index expression",
+    "load of address",
+    "store to address",
+    "insufficient space",
+    "member access within",
+)
+
+
+def _sanitizer_events(logs: Mapping[str, Path]) -> list[EvidenceEvent]:
+    events: list[EvidenceEvent] = []
+    seen: set[tuple[str, str, str]] = set()
+    for actor, log_path in logs.items():
+        archive = log_path.with_suffix(log_path.suffix + ".gz")
+        source_path = archive if archive.is_file() else log_path
+        opener = gzip.open if source_path.suffix == ".gz" else open
+        with opener(source_path, "rt", encoding="utf-8", errors="replace") as stream:
+            for raw_line in stream:
+                line = _ANSI_ESCAPE.sub("", raw_line).strip()
+                detected: tuple[str, str] | None = None
+                for sanitizer, pattern in _SANITIZER_PATTERNS:
+                    match = pattern.search(line)
+                    if match:
+                        violation = match.group(1).strip().lower().replace(" ", "_")
+                        if sanitizer == "thread":
+                            violation = "data-race"
+                        elif sanitizer == "memory":
+                            violation = "use-of-uninitialized-value"
+                        detected = (sanitizer, violation)
+                        break
+                if detected is None and "runtime error:" in line:
+                    detail = line.split("runtime error:", 1)[1].strip()
+                    if any(term in detail.lower() for term in _UBSAN_MEMORY_TERMS):
+                        detected = ("undefined", "memory_undefined_behavior")
+                if detected is None:
+                    continue
+                sanitizer, violation = detected
+                key = (actor, sanitizer, violation)
+                if key in seen:
+                    continue
+                seen.add(key)
+                events.append(
+                    EvidenceEvent(
+                        kind=EventKind.MEMORY_SAFETY_VIOLATION,
+                        actor=actor,
+                        implementation="fastdds",
+                        outcome="detected",
+                        attributes={
+                            "sanitizer": sanitizer,
+                            "violation": violation,
+                        },
+                        source=source_path.name,
+                    )
+                )
+    return events
 
 
 class FastDDSLegacyTextImporter:
@@ -322,11 +397,20 @@ class FastDDSAdapter:
             events = [EvidenceEvent.from_dict(raw) for raw in artifacts.structured_events]
             if events and all(event.monotonic_ns is not None for event in events):
                 events.sort(key=lambda event: int(event.monotonic_ns or 0))
+            events.extend(_sanitizer_events(artifacts.logs))
             events.extend(self._legacy_importer.process_exit_events(artifacts.statuses))
         else:
             events = self._legacy_importer.import_logs(artifacts.logs, artifacts.statuses)
         if artifacts.error is not None:
-            actor = artifacts.processes[-1].actor
+            affected = artifacts.error.get("affected_actors", [])
+            actor = (
+                affected[0]
+                if isinstance(affected, list)
+                and affected
+                and isinstance(affected[0], str)
+                and affected[0] in scenario.participants
+                else artifacts.processes[-1].actor
+            )
             events.append(
                 EvidenceEvent(
                     kind=EventKind.EXECUTION_DIVERGENCE,

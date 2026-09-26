@@ -490,6 +490,7 @@ def run_campaign(
     selection_strategy: str = "manifest",
     execution_budget: int | None = None,
     selection_seed: int = 0,
+    plateau_window: int = 0,
 ) -> CampaignReport:
     if overwrite and resume:
         raise CampaignError("--overwrite and --resume are mutually exclusive")
@@ -497,6 +498,8 @@ def run_campaign(
         raise CampaignError("generated identities and explicit policy configuration are mutually exclusive")
     if repetitions <= 0 or repetitions > 1000:
         raise CampaignError("repetitions must be between 1 and 1000")
+    if plateau_window < 0:
+        raise CampaignError("plateau window must be non-negative")
     manifest_digest, cases = load_manifest(manifest_path)
     if selection_strategy not in ("manifest", "coverage-guided"):
         raise CampaignError("selection strategy must be manifest or coverage-guided")
@@ -685,6 +688,8 @@ def run_campaign(
                 break
         if scheduler is not None:
             scheduler.observe(case, case_evidence)
+            if scheduler.plateau_reached(plateau_window):
+                stopped = True
         if stopped:
             break
 

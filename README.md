@@ -175,9 +175,12 @@ orders and spacings. One zero-offset, barrier-preserving baseline is always reta
 even when only relaxed mutations or nonzero spacings are requested; the remaining
 pool is selected deterministically from the configured seed. In the default
 `coverage-guided` strategy, the baseline executes first. Each completed trace is
-normalized into protocol states and actor/global transitions; GUIDs, timestamps, key
-fingerprints, and byte counts are excluded. Static schedule features that produced
-new runtime coverage receive energy when the next pending trajectory is chosen. The
+normalized into protocol states, actor-local transitions, explicit causal edges, and
+security milestones; GUIDs, timestamps, key fingerprints, and byte counts are
+excluded. Cross-process log adjacency is never treated as protocol causality. Static
+schedule features that produced new weighted runtime coverage receive energy when the
+next pending trajectory is chosen. `--plateau-window` stops a campaign after repeated
+zero-novelty trajectories (20 by default; 0 disables it). The
 `--budget` limits executions while `--pool-size` controls the candidate pool (default
 four times the budget). `--action-jitter-ms` adds stable per-action early/late timing
 mutations without reordering a plan. Every trial writes
@@ -185,6 +188,14 @@ mutations without reordering a plan. Every trial writes
 `exploration-report.json` clusters stable semantic fingerprints, reports occurrence
 rates, and marks candidates that exist only under a mutated schedule. A later barrier
 failure or role exit does not erase an earlier security divergence.
+ASan, UBSan memory diagnostics, TSan, and MSan output are normalized into
+`memory_safety.violation` events; a sanitizer-confirmed native failure remains a High
+lead even though the crashing process cannot complete normally.
+
+Large structured-mode logs are compacted after event ingestion: the readable `.log`
+keeps every `DDSLEUTH_EVENT` and bounded diagnostic head/tail sections, while the
+byte-exact original is retained as `.log.gz`. Repetitive vendor errors therefore do
+not dominate long campaign storage or discard forensic data.
 
 Roles may also declare an ordered `actions` array. The runner validates it, writes a
 versioned tab-separated plan inside the isolated run directory, and injects only that
@@ -208,7 +219,9 @@ without adding a new probe mode for every sequence. Actions with equal timestamp
 their declared order. `credential.wait_revoked` blocks on the implementation's real
 authentication callback; a participant identity with `expires_after_seconds` is signed
 with an exact second-granularity `notAfter` for this experiment. This is not a synthetic
-"revoke" marker. See `native_participant_reconnect.json` and
+"revoke" marker. `sample.observe TARGET WINDOW_MS` records either `target_reached` or
+`expired` without turning the absence of a post-attack delivery into a process error.
+See `native_participant_reconnect.json` and
 `native_credential_revocation_rekey.json` for complete live cases.
 
 Wire replay and transport faults are implemented outside the DDS API:
@@ -220,10 +233,16 @@ export DDSLEUTH_TRANSPORT_FAULT_LIBRARY="$PWD/build/transport-fault/libddsleuth_
 ```
 
 Roles may then use `transport.drop_next`, `transport.delay_next`,
-`transport.duplicate_next`, and `transport.replay_last`. The shim interposes the UDP
+`transport.duplicate_next`, `transport.capture_next`, and `transport.replay_last`.
+`capture_next` stores a bounded wire image without altering delivery, and replay
+prefers that image over unrelated later control traffic. The shim interposes the UDP
 send boundary, refuses to mutate non-loopback destinations, emits normalized events,
 and has its SHA-256 recorded in evidence. `transport.replay_last` resends captured
-bytes; it is not an application-level second write. See `native_transport_replay.json`.
+bytes; it is not an application-level second write. For Fast DDS native scenarios the
+runner disables builtin transports and DataSharing for every participant, and the
+probe invokes the shim synchronously so declared action order is real wire order. A
+trial is inconclusive unless every requested fault emits an action-id-correlated
+applied event. See `native_transport_replay.json`.
 
 To run a local Fast DDS golden harness, provide the executable, certificate directory, and signed policy directory through environment variables:
 

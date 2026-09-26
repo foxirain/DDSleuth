@@ -63,6 +63,14 @@ lifecycle, and application-delivery invariants across distributed state transiti
   explicit revocation-driven rekey evidence, replay, and controlled transport faults.
 - [x] Runtime coverage feedback over semantic states and transitions rather than source
   lines, with bounded pool selection and an auditable selection trace.
+- [x] Replace cross-process adjacency with actor-local and shared-identifier causal
+  coverage, weighted security milestones, and High/Critical frontier scoring.
+- [x] Fail closed when a requested transport mutation was not applied, force Fast DDS
+  transport experiments onto UDP, and bind replay to an explicit captured wire image.
+- [x] Add post-attack observation windows, coverage-plateau termination, and bounded
+  lossless archival of repetitive runtime logs.
+- [x] Normalize sanitizer-confirmed native memory-safety failures into ranked High
+  discovery leads instead of generic process divergence.
 
 ### M4 — Second implementation
 

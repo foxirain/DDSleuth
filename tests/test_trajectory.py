@@ -89,6 +89,7 @@ class TrajectoryTests(unittest.TestCase):
                 "trajectory.spacing_ms": 0,
                 "trajectory.barrier_mode": "preserve",
                 "trajectory.action_jitter_ms": 0,
+                "trajectory.scheduler_seed": True,
             },
             assignments,
         )
@@ -194,7 +195,10 @@ class TrajectoryTests(unittest.TestCase):
             self.assertEqual(3, len(campaign.cases))
             self.assertIsNotNone(campaign.selection)
             assert campaign.selection is not None
-            self.assertEqual("runtime-coverage-guided", campaign.selection["strategy"])
+            self.assertEqual(
+                "causal-security-coverage-guided",
+                campaign.selection["strategy"],
+            )
             self.assertEqual(6, campaign.selection["pool_size"])
             trace = campaign.selection["selection_trace"]
             self.assertTrue(trace[0]["baseline"])
@@ -238,6 +242,22 @@ class TrajectoryTests(unittest.TestCase):
         identifiers = [case["id"] for case, _ in trajectories]
         self.assertEqual(2, len(identifiers))
         self.assertEqual(2, len(set(identifiers)))
+
+    def test_semantic_matrix_cannot_fill_pool_with_baselines_only(self) -> None:
+        trajectories = generate_trajectories(
+            self._raw_scenario(),
+            dimensions=(
+                MatrixDimension(path=("domain_id",), values=tuple(range(10, 20))),
+            ),
+            dimension_strategy="cartesian",
+            spacings_ms=(0, 10),
+            barrier_modes=("preserve",),
+            budget=4,
+            seed=23,
+        )
+        assignments = [item[1] for item in trajectories]
+        self.assertEqual(1, sum(item["trajectory.scheduler_seed"] is True for item in assignments))
+        self.assertTrue(any(item["trajectory.spacing_ms"] == 10 for item in assignments))
 
 
 if __name__ == "__main__":

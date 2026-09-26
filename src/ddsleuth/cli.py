@@ -289,6 +289,7 @@ def _cmd_explore(args: argparse.Namespace) -> int:
         selection_strategy=args.strategy,
         execution_budget=execution_budget,
         selection_seed=args.seed,
+        plateau_window=args.plateau_window,
     )
     exploration_path = output_root / "exploration-report.json"
     exploration = analyze_exploration(
@@ -450,6 +451,12 @@ def _build_parser() -> argparse.ArgumentParser:
         help="trajectory candidate pool (default: 4x execution budget for guided runs)",
     )
     explore.add_argument("--seed", type=int, default=0)
+    explore.add_argument(
+        "--plateau-window",
+        type=int,
+        default=20,
+        help="stop after this many trajectories add no runtime coverage (0 disables)",
+    )
     explore.add_argument("--spacing-ms", action="append", type=int)
     explore.add_argument(
         "--barrier-mode",

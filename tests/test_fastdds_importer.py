@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import unittest
+import tempfile
+from pathlib import Path
 
-from ddsleuth.adapters.fastdds import FastDDSLegacyTextImporter
+from ddsleuth.adapters.fastdds import FastDDSLegacyTextImporter, _sanitizer_events
 from ddsleuth.models import EventKind
 
 
@@ -65,6 +67,20 @@ class FastDDSImporterTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(ValueError, "does not match log owner"):
             self.importer.parse_text("attacker", line, "attacker.log")
+
+    def test_normalizes_memory_sanitizer_diagnostics(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            log = Path(directory) / "reader.log"
+            log.write_text(
+                "==1==ERROR: AddressSanitizer: heap-buffer-overflow on address 0x1\n"
+                "SUMMARY: AddressSanitizer: heap-buffer-overflow target.cpp:1\n",
+                encoding="utf-8",
+            )
+            events = _sanitizer_events({"reader": log})
+        self.assertEqual(1, len(events))
+        self.assertEqual(EventKind.MEMORY_SAFETY_VIOLATION, events[0].kind)
+        self.assertEqual("address", events[0].attributes["sanitizer"])
+        self.assertEqual("heap-buffer-overflow", events[0].attributes["violation"])
 
 
 if __name__ == "__main__":

@@ -1,5 +1,6 @@
 #include "ddsleuth_event.hpp"
 
+#include <dlfcn.h>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -47,6 +48,7 @@
 #include <fastdds/dds/xtypes/dynamic_types/TypeDescriptor.hpp>
 #include <fastdds/dds/xtypes/type_representation/TypeObject.hpp>
 #include <fastdds/rtps/participant/ParticipantDiscoveryInfo.hpp>
+#include <fastdds/rtps/transport/UDPv4TransportDescriptor.hpp>
 
 using namespace eprosima::fastdds::dds;
 
@@ -318,7 +320,19 @@ DomainParticipantQos security_qos(
         "dds.sec.access.builtin.Access-Permissions.permissions",
         file_uri(std::filesystem::path(policies) / "permissions.smime"));
     properties.emplace_back("dds.sec.crypto.plugin", "builtin.AES-GCM-GMAC");
+    if (optional_environment("DDSLEUTH_FORCE_UDP_ONLY", "0") == "1")
+    {
+        qos.transport().use_builtin_transports = false;
+        auto udp = std::make_shared<eprosima::fastdds::rtps::UDPv4TransportDescriptor>();
+        udp->interfaceWhiteList.emplace_back("127.0.0.1");
+        qos.transport().user_transports.push_back(udp);
+    }
     return qos;
+}
+
+bool force_udp_only()
+{
+    return optional_environment("DDSLEUTH_FORCE_UDP_ONLY", "0") == "1";
 }
 
 DynamicType::_ref_type create_type()
@@ -750,6 +764,7 @@ void write_sample(
     const ddsleuth::JsonObject sample_attributes = ddsleuth::JsonObject()
             .integer("sample_index", sample_index)
             .string("message", message)
+            .string("topic", arguments.topic)
             .integer("lifecycle_epoch", lifecycle_epoch);
     sink.emit("application.write_attempt", arguments.actor, "attempted", sample_attributes);
     if (writer->write(&data) != RETCODE_OK)
@@ -816,6 +831,16 @@ uint32_t action_count(
            positive_text(action.arguments[0], "action " + action.id + " count");
 }
 
+std::chrono::milliseconds action_window(
+        const PlannedAction& action,
+        std::chrono::milliseconds fallback)
+{
+    return action.arguments.size() < 2 ?
+           fallback :
+           std::chrono::milliseconds(
+        positive_text(action.arguments[1], "action " + action.id + " window_ms"));
+}
+
 DomainParticipant* create_secure_participant(
         const Arguments& arguments,
         ParticipantSecurityListener& listener,
@@ -855,6 +880,30 @@ bool delegated_transport_action(
     return action.operation.rfind("transport.", 0) == 0;
 }
 
+void apply_delegated_transport_action(
+        const PlannedAction& action)
+{
+    using Apply = int (*)(const char*, const char*, const char* const*, size_t);
+    auto apply = reinterpret_cast<Apply>(dlsym(RTLD_DEFAULT, "ddsleuth_transport_apply"));
+    if (apply == nullptr)
+    {
+        throw std::runtime_error(
+                  "transport action requested but the fault shim control API is unavailable");
+    }
+    std::vector<const char*> raw_arguments;
+    raw_arguments.reserve(action.arguments.size());
+    for (const std::string& argument : action.arguments)
+    {
+        raw_arguments.push_back(argument.c_str());
+    }
+    if (apply(
+                action.id.c_str(), action.operation.c_str(), raw_arguments.data(),
+                raw_arguments.size()) != 0)
+    {
+        throw std::runtime_error("transport fault shim rejected action " + action.id);
+    }
+}
+
 int run_scripted_writer(
         const Arguments& arguments,
         ParticipantOwner& participant_owner,
@@ -876,6 +925,10 @@ int run_scripted_writer(
     DataWriterQos writer_qos = DATAWRITER_QOS_DEFAULT;
     publisher->get_default_datawriter_qos(writer_qos);
     writer_qos.reliability().kind = RELIABLE_RELIABILITY_QOS;
+    if (force_udp_only())
+    {
+        writer_qos.data_sharing().off();
+    }
     if (arguments.max_blocks_per_session > 0)
     {
         writer_qos.properties().properties().emplace_back(
@@ -1009,6 +1062,10 @@ int run_scripted_writer(
             publisher_owner.reset(participant, publisher);
             publisher->get_default_datawriter_qos(writer_qos);
             writer_qos.reliability().kind = RELIABLE_RELIABILITY_QOS;
+            if (force_udp_only())
+            {
+                writer_qos.data_sharing().off();
+            }
             if (arguments.max_blocks_per_session > 0)
             {
                 writer_qos.properties().properties().emplace_back(
@@ -1029,8 +1086,15 @@ int run_scripted_writer(
         }
         else if (delegated_transport_action(action))
         {
-            // A loopback fault shim consumes the same authenticated plan. The
-            // probe deliberately performs no packet emulation itself.
+            apply_delegated_transport_action(action);
+            emit_action_event(sink, arguments, action, "action.delegated", "delegated");
+            continue;
+        }
+        else if (action.operation == "execution.checkpoint")
+        {
+            // The scheduled timestamp itself is the hold.  This action keeps
+            // the process and its transport shim alive through an observation
+            // window without adding another protocol transition.
         }
         else
         {
@@ -1062,6 +1126,10 @@ int run_scripted_reader(
     DataReaderQos reader_qos = DATAREADER_QOS_DEFAULT;
     subscriber->get_default_datareader_qos(reader_qos);
     reader_qos.reliability().kind = RELIABLE_RELIABILITY_QOS;
+    if (force_udp_only())
+    {
+        reader_qos.data_sharing().off();
+    }
 
     DataReader* reader = nullptr;
     uint32_t lifecycle_epoch = 0;
@@ -1113,6 +1181,24 @@ int run_scripted_reader(
                 throw std::runtime_error("scripted reader did not receive the requested samples");
             }
         }
+        else if (action.operation == "sample.observe")
+        {
+            if (reader == nullptr)
+            {
+                throw std::runtime_error("cannot observe samples without an active reader");
+            }
+            const uint32_t target = action_count(action, arguments.expected_samples);
+            const std::chrono::milliseconds window = action_window(action, arguments.timeout);
+            const bool reached = listener.wait(window, target);
+            sink.emit("application.observation_window", arguments.actor,
+                    reached ? "target_reached" : "expired",
+                    ddsleuth::JsonObject()
+                            .string("topic", arguments.topic)
+                            .integer("expected_samples", target)
+                            .integer("observed_samples", listener.received_count())
+                            .integer("window_ms", window.count())
+                            .integer("lifecycle_epoch", lifecycle_epoch));
+        }
         else if (action.operation == "endpoint.destroy")
         {
             if (reader == nullptr)
@@ -1162,6 +1248,10 @@ int run_scripted_reader(
             subscriber_owner.reset(participant, subscriber);
             subscriber->get_default_datareader_qos(reader_qos);
             reader_qos.reliability().kind = RELIABLE_RELIABILITY_QOS;
+            if (force_udp_only())
+            {
+                reader_qos.data_sharing().off();
+            }
             ++participant_epoch;
             sink.emit("participant.reconnected", arguments.actor, "reconnected",
                     ddsleuth::JsonObject().integer("participant_epoch", participant_epoch));
@@ -1176,7 +1266,13 @@ int run_scripted_reader(
         }
         else if (delegated_transport_action(action))
         {
-            // Handled by the loopback transport fault shim.
+            apply_delegated_transport_action(action);
+            emit_action_event(sink, arguments, action, "action.delegated", "delegated");
+            continue;
+        }
+        else if (action.operation == "execution.checkpoint")
+        {
+            // See the writer-side checkpoint above.
         }
         else
         {
@@ -1206,6 +1302,10 @@ int run_writer(
     DataWriterQos writer_qos = DATAWRITER_QOS_DEFAULT;
     publisher->get_default_datawriter_qos(writer_qos);
     writer_qos.reliability().kind = RELIABLE_RELIABILITY_QOS;
+    if (force_udp_only())
+    {
+        writer_qos.data_sharing().off();
+    }
     if (arguments.max_blocks_per_session > 0)
     {
         writer_qos.properties().properties().emplace_back(
@@ -1344,6 +1444,10 @@ int run_reader(
     DataReaderQos reader_qos = DATAREADER_QOS_DEFAULT;
     subscriber->get_default_datareader_qos(reader_qos);
     reader_qos.reliability().kind = RELIABLE_RELIABILITY_QOS;
+    if (force_udp_only())
+    {
+        reader_qos.data_sharing().off();
+    }
     DataReader* reader = subscriber->create_datareader(
         topic,
         reader_qos,
@@ -1394,6 +1498,7 @@ int run(
     sink.emit("probe.ready", arguments.actor, "ready",
             ddsleuth::JsonObject()
                     .string("endpoint", "participant")
+                    .string("transport_mode", force_udp_only() ? "udp_only" : "default")
                     .integer("participant_epoch", 1));
 
     if (arguments.mode == "scripted-writer")

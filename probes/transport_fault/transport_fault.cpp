@@ -72,19 +72,38 @@ std::string json_escape(const std::string& value)
 }
 
 void emit(const std::string& kind, const std::string& actor, const std::string& outcome,
-        const std::string& fault, size_t bytes, const std::string& action_id)
+        const std::string& fault, size_t bytes, const std::string& action_id,
+        const std::string& source_action_id = "")
 {
+    const auto monotonic_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
     std::ostringstream output;
     output << "DDSLEUTH_EVENT {\"kind\":\"" << kind
            << "\",\"actor\":\"" << json_escape(actor)
            << "\",\"implementation\":\"fastdds\",\"outcome\":\"" << outcome
-           << "\",\"attributes\":{\"fault\":\"" << fault
+           << "\",\"monotonic_ns\":" << monotonic_ns
+           << ",\"attributes\":{\"fault\":\"" << fault
            << "\",\"transport\":\"udp\",\"loopback\":true,\"packet_bytes\":" << bytes
-           << ",\"action_id\":\"" << json_escape(action_id) << "\"}}\n";
+           << ",\"action_id\":\"" << json_escape(action_id) << "\"";
+    if (!source_action_id.empty())
+    {
+        output << ",\"source_action_id\":\"" << json_escape(source_action_id) << "\"";
+    }
+    output << "}}\n";
     const std::string text = output.str();
     static std::mutex output_mutex;
     std::lock_guard<std::mutex> lock(output_mutex);
-    static_cast<void>(::write(STDERR_FILENO, text.data(), text.size()));
+    size_t written = 0;
+    while (written < text.size())
+    {
+        const ssize_t result = ::write(
+            STDERR_FILENO, text.data() + written, text.size() - written);
+        if (result <= 0)
+        {
+            break;
+        }
+        written += static_cast<size_t>(result);
+    }
 }
 
 bool is_loopback(const sockaddr* address)
@@ -165,7 +184,22 @@ public:
         if (!actions_.empty())
         {
             enabled_ = true;
-            std::thread([this]() { run_actions(); }).detach();
+            const char* control = std::getenv("DDSLEUTH_TRANSPORT_CONTROL");
+            if (control == nullptr || std::string(control) != "explicit")
+            {
+                size_t next_action = 0;
+                while (next_action < actions_.size() &&
+                        actions_[next_action].at_ms <= 0.0 &&
+                        actions_[next_action].operation != "transport.replay_last")
+                {
+                    static_cast<void>(apply(actions_[next_action]));
+                    ++next_action;
+                }
+                if (next_action < actions_.size())
+                {
+                    std::thread([this, next_action]() { run_actions(next_action); }).detach();
+                }
+            }
         }
     }
 
@@ -179,12 +213,20 @@ public:
 
         uint32_t delay_ms = 0;
         uint32_t duplicates = 0;
+        std::string capture_id;
         std::string drop_id;
         std::string delay_id;
         std::string duplicate_id;
         {
             std::lock_guard<std::mutex> lock(mutex_);
-            remember(fd, data, size, destination, destination_size);
+            remember(last_, fd, data, size, destination, destination_size);
+            if (capture_remaining_ > 0)
+            {
+                --capture_remaining_;
+                capture_id = capture_action_;
+                remember(captured_, fd, data, size, destination, destination_size);
+                captured_action_ = capture_action_;
+            }
             if (drop_remaining_ > 0)
             {
                 --drop_remaining_;
@@ -201,6 +243,11 @@ public:
             }
         }
         available_.notify_all();
+        if (!capture_id.empty())
+        {
+            emit("transport.datagram_captured", actor_, "captured", "capture_next", size,
+                    capture_id);
+        }
         if (!drop_id.empty())
         {
             emit("transport.datagram_dropped", actor_, "dropped", "drop_next", size, drop_id);
@@ -229,70 +276,102 @@ public:
         return real_sendto_;
     }
 
-private:
-    void remember(int fd, const void* data, size_t size,
-            const sockaddr* destination, socklen_t destination_size)
+    bool apply(const Action& action)
     {
-        if (last_.fd >= 0)
+        if (!enabled_)
         {
-            ::close(last_.fd);
+            return false;
         }
-        last_.fd = ::dup(fd);
-        last_.bytes.assign(
-            static_cast<const uint8_t*>(data), static_cast<const uint8_t*>(data) + size);
-        last_.destination_size = destination_size;
-        std::memcpy(&last_.destination, destination, destination_size);
+        if (action.operation == "transport.drop_next")
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            drop_remaining_ += positive(action, 0, 1);
+            drop_action_ = action.id;
+            emit("transport.fault_armed", actor_, "armed", "drop_next", 0, action.id);
+            return true;
+        }
+        if (action.operation == "transport.delay_next")
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            delay_ms_ = positive(action, 0, 1);
+            delay_action_ = action.id;
+            emit("transport.fault_armed", actor_, "armed", "delay_next", 0, action.id);
+            return true;
+        }
+        if (action.operation == "transport.duplicate_next")
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            duplicate_remaining_ += positive(action, 0, 1);
+            duplicate_action_ = action.id;
+            emit("transport.fault_armed", actor_, "armed", "duplicate_next", 0, action.id);
+            return true;
+        }
+        if (action.operation == "transport.capture_next")
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            capture_remaining_ += positive(action, 0, 1);
+            capture_action_ = action.id;
+            emit("transport.fault_armed", actor_, "armed", "capture_next", 0, action.id);
+            return true;
+        }
+        if (action.operation == "transport.replay_last")
+        {
+            emit("transport.fault_armed", actor_, "armed", "replay_last", 0, action.id);
+            replay(action);
+            return true;
+        }
+        return false;
     }
 
-    void run_actions()
+private:
+    void remember(Datagram& target, int fd, const void* data, size_t size,
+            const sockaddr* destination, socklen_t destination_size)
     {
-        for (const Action& action : actions_)
+        if (target.fd >= 0)
         {
+            ::close(target.fd);
+        }
+        target.fd = ::dup(fd);
+        target.bytes.assign(
+            static_cast<const uint8_t*>(data), static_cast<const uint8_t*>(data) + size);
+        target.destination_size = destination_size;
+        std::memcpy(&target.destination, destination, destination_size);
+    }
+
+    void run_actions(size_t first_action)
+    {
+        for (size_t index = first_action; index < actions_.size(); ++index)
+        {
+            const Action& action = actions_[index];
             const auto offset = std::chrono::duration_cast<std::chrono::steady_clock::duration>(
                 std::chrono::duration<double, std::milli>(action.at_ms));
             std::this_thread::sleep_until(started_ + offset);
-            if (action.operation == "transport.drop_next")
-            {
-                std::lock_guard<std::mutex> lock(mutex_);
-                drop_remaining_ += positive(action, 0, 1);
-                drop_action_ = action.id;
-                emit("transport.fault_armed", actor_, "armed", "drop_next", 0, action.id);
-            }
-            else if (action.operation == "transport.delay_next")
-            {
-                std::lock_guard<std::mutex> lock(mutex_);
-                delay_ms_ = positive(action, 0, 1);
-                delay_action_ = action.id;
-                emit("transport.fault_armed", actor_, "armed", "delay_next", 0, action.id);
-            }
-            else if (action.operation == "transport.duplicate_next")
-            {
-                std::lock_guard<std::mutex> lock(mutex_);
-                duplicate_remaining_ += positive(action, 0, 1);
-                duplicate_action_ = action.id;
-                emit("transport.fault_armed", actor_, "armed", "duplicate_next", 0, action.id);
-            }
-            else if (action.operation == "transport.replay_last")
-            {
-                replay(action);
-            }
+            static_cast<void>(apply(action));
         }
     }
 
     void replay(const Action& action)
     {
         Datagram datagram;
+        std::string source_action_id;
         {
             std::unique_lock<std::mutex> lock(mutex_);
-            available_.wait_for(lock, std::chrono::seconds(5), [this]() { return last_.fd >= 0; });
-            if (last_.fd < 0)
+            available_.wait_for(lock, std::chrono::seconds(5), [this]()
+                    {
+                        return captured_.fd >= 0 || last_.fd >= 0;
+                    });
+            const Datagram& source = captured_.fd >= 0 ? captured_ : last_;
+            source_action_id = captured_.fd >= 0 ? captured_action_ : "latest_datagram";
+            if (source.fd < 0)
             {
+                emit("transport.datagram_replayed", actor_, "failed", "replay_last", 0,
+                        action.id);
                 return;
             }
-            datagram.fd = ::dup(last_.fd);
-            datagram.bytes = last_.bytes;
-            datagram.destination = last_.destination;
-            datagram.destination_size = last_.destination_size;
+            datagram.fd = ::dup(source.fd);
+            datagram.bytes = source.bytes;
+            datagram.destination = source.destination;
+            datagram.destination_size = source.destination_size;
         }
         const uint32_t count = positive(action, 0, 1);
         bool succeeded = true;
@@ -305,7 +384,7 @@ private:
         }
         ::close(datagram.fd);
         emit("transport.datagram_replayed", actor_, succeeded ? "replayed" : "failed",
-                "replay_last", datagram.bytes.size(), action.id);
+                "replay_last", datagram.bytes.size(), action.id, source_action_id);
     }
 
     std::string actor_;
@@ -316,12 +395,16 @@ private:
     std::mutex mutex_;
     std::condition_variable available_;
     Datagram last_;
+    Datagram captured_;
+    uint32_t capture_remaining_{0};
     uint32_t drop_remaining_{0};
     uint32_t delay_ms_{0};
     uint32_t duplicate_remaining_{0};
     std::string drop_action_;
     std::string delay_action_;
     std::string duplicate_action_;
+    std::string capture_action_;
+    std::string captured_action_;
 };
 
 Controller& controller()
@@ -364,4 +447,28 @@ extern "C" ssize_t sendmsg(int fd, const msghdr* message, int flags)
     return controller().send(
         fd, bytes.data(), bytes.size(), flags,
         static_cast<const sockaddr*>(message->msg_name), message->msg_namelen);
+}
+
+extern "C" int ddsleuth_transport_apply(
+        const char* action_id,
+        const char* operation,
+        const char* const* arguments,
+        size_t argument_count)
+{
+    if (action_id == nullptr || operation == nullptr)
+    {
+        return -1;
+    }
+    Action action;
+    action.id = action_id;
+    action.operation = operation;
+    for (size_t index = 0; index < argument_count; ++index)
+    {
+        if (arguments == nullptr || arguments[index] == nullptr)
+        {
+            return -1;
+        }
+        action.arguments.emplace_back(arguments[index]);
+    }
+    return controller().apply(action) ? 0 : -1;
 }

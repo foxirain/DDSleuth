@@ -107,6 +107,7 @@ def _candidate(
     execution_complete: bool,
     discriminator: Mapping[str, JsonValue] | None = None,
     details: Mapping[str, JsonValue] | None = None,
+    penalize_incomplete: bool = True,
 ) -> DiscoveryCandidate:
     actor_tuple = tuple(sorted(set(actors)))
     resource_tuple = tuple(sorted(set(resources)))
@@ -118,14 +119,21 @@ def _candidate(
     )
     # An interrupted schedule is still a discovery signal, but it must not be
     # ranked as highly as the same semantic divergence in a complete run.
-    adjusted_confidence = confidence if execution_complete else max(0.1, confidence - 0.15)
+    adjusted_confidence = (
+        confidence
+        if execution_complete or not penalize_incomplete
+        else max(0.1, confidence - 0.15)
+    )
     return DiscoveryCandidate(
         candidate_id=candidate_id,
         fingerprint=fingerprint,
         family=family,
         title=title,
         risk_tier=risk_tier,
-        score=max(0, min(100, score - (8 if not execution_complete else 0))),
+        score=max(
+            0,
+            min(100, score - (8 if not execution_complete and penalize_incomplete else 0)),
+        ),
         confidence=round(adjusted_confidence, 3),
         actors=actor_tuple,
         resources=resource_tuple,
@@ -156,6 +164,10 @@ def discover_candidates(
     local_revocations: dict[str, int] = {}
     writes_after_revocation: dict[str, list[tuple[int, str | None]]] = defaultdict(list)
     received_messages: dict[str, list[tuple[int, str]]] = defaultdict(list)
+    received_samples: dict[tuple[str, str, int, str], list[int]] = defaultdict(list)
+    replay_events: list[int] = []
+    memory_safety_events: list[tuple[int, str, str, str]] = []
+    applied_transport_faults: list[int] = []
 
     for index, event in enumerate(evidence.events):
         sequence = index if event.sequence is None else event.sequence
@@ -224,11 +236,116 @@ def discover_candidates(
             message = event.attributes.get("message")
             if isinstance(message, str):
                 received_messages[message].append((sequence, event.actor))
+                topic = event.attributes.get("topic")
+                sample_index = event.attributes.get("sample_index")
+                if isinstance(topic, str) and isinstance(sample_index, int):
+                    received_samples[(event.actor, topic, sample_index, message)].append(sequence)
             resource = event_resource(scenario, event, operation="subscribe")
             if resource is not None and not is_permitted(
                 scenario, event.actor, "subscribe", resource
             ):
                 unauthorized_deliveries.setdefault((event.actor, resource), []).append(sequence)
+
+        if (
+            event.kind == EventKind.TRANSPORT_DATAGRAM_REPLAYED
+            and event.outcome == "replayed"
+        ):
+            replay_events.append(sequence)
+
+        if event.kind in (
+            EventKind.TRANSPORT_DATAGRAM_DROPPED,
+            EventKind.TRANSPORT_DATAGRAM_DELAYED,
+            EventKind.TRANSPORT_DATAGRAM_DUPLICATED,
+            EventKind.TRANSPORT_DATAGRAM_CAPTURED,
+            EventKind.TRANSPORT_DATAGRAM_REPLAYED,
+        ) and event.outcome not in ("failed", "not_applied"):
+            applied_transport_faults.append(sequence)
+
+        if (
+            event.kind == EventKind.MEMORY_SAFETY_VIOLATION
+            and event.outcome == "detected"
+        ):
+            sanitizer = event.attributes.get("sanitizer")
+            violation = event.attributes.get("violation")
+            if isinstance(sanitizer, str) and isinstance(violation, str):
+                memory_safety_events.append((sequence, event.actor, sanitizer, violation))
+
+    for sequence, actor, sanitizer, violation in memory_safety_events:
+        stronger = any(
+            marker in violation
+            for marker in (
+                "use-after-free",
+                "buffer-overflow",
+                "double-free",
+                "container-overflow",
+                "use-after-return",
+            )
+        )
+        related_faults = [item for item in applied_transport_faults if item < sequence]
+        signals = ["sanitizer_detected", "native_memory_safety_failure"]
+        if related_faults:
+            signals.append("applied_transport_mutation_preceded_failure")
+        candidates.append(
+            _candidate(
+                family="sanitizer_memory_safety_failure",
+                title=f"{sanitizer} sanitizer detected {violation} in {actor}",
+                risk_tier="high_lead",
+                score=96 if stronger else 90,
+                confidence=0.99,
+                actors=(actor,),
+                resources=tuple(scenario.topics),
+                evidence_events=(*related_faults, sequence),
+                signals=signals,
+                execution_complete=execution_complete,
+                discriminator={
+                    "actor": actor,
+                    "sanitizer": sanitizer,
+                    "violation": violation,
+                },
+                details={
+                    "sanitizer": sanitizer,
+                    "violation": violation,
+                    "applied_transport_fault_count": len(related_faults),
+                },
+                penalize_incomplete=False,
+            )
+        )
+
+    for (actor, topic, sample_index, message), deliveries in received_samples.items():
+        if len(deliveries) < 2:
+            continue
+        related_replays = [
+            sequence
+            for sequence in replay_events
+            if deliveries[0] < sequence < deliveries[-1]
+        ]
+        if not related_replays:
+            continue
+        candidates.append(
+            _candidate(
+                family="transport_replay_duplicate_delivery",
+                title=f"Replayed protected sample was delivered again to {actor}",
+                risk_tier="high_lead",
+                score=93,
+                confidence=0.98,
+                actors=(actor,),
+                resources=(topic,),
+                evidence_events=(*deliveries, *related_replays),
+                signals=(
+                    "udp_datagram_replay_applied",
+                    "duplicate_application_delivery",
+                    "freshness_or_deduplication_failure",
+                ),
+                execution_complete=execution_complete,
+                discriminator={"sample_index": sample_index, "topic": topic},
+                details={
+                    "sample_index": sample_index,
+                    "message": message,
+                    "delivery_count": len(deliveries),
+                    "replay_count": len(related_replays),
+                },
+            )
+        )
 
     for actor, writes in writes_after_revocation.items():
         deliveries = [

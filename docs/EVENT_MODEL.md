@@ -70,11 +70,15 @@ must not be used for cross-process lifecycle ordering claims.
 | `transport.datagram_dropped` | The shim suppressed an outbound loopback datagram |
 | `transport.datagram_delayed` | The shim delayed an outbound loopback datagram |
 | `transport.datagram_duplicated` | The shim duplicated an outbound loopback datagram |
+| `transport.datagram_captured` | The shim retained a bounded wire image without mutating delivery |
 | `transport.datagram_replayed` | The shim resent an exact captured wire datagram |
 | `application.write_attempt` | A sample was fully populated and is about to enter the DDS write call |
 | `application.sample_written` | The DDS write call returned success |
 | `application.sample_received` | A real application endpoint returned the sample |
+| `application.observation_window` | A bounded post-action window reached its target or expired |
+| `memory_safety.violation` | A native sanitizer detected a normalized memory-safety failure |
 | `action.started` | A runner-planned adapter action began |
+| `action.delegated` | A transport action was synchronously handed to its shim |
 | `action.completed` | A runner-planned adapter action completed |
 | `execution.divergence` | The scheduler preserved a partial trace after timeout, barrier failure, or role failure |
 | `process.exit` | A scenario role completed or failed |
@@ -133,11 +137,13 @@ causality should use the attempt event and correlate `sample_index` plus `messag
 an adapter-specific opaque sample identifier), not assume that log line order grouped
 by process is causal order.
 
-`action.started` and `action.completed` bracket one adapter action from the
+`action.started` and `action.completed` bracket one local adapter action from the
 runner-generated plan. They contain the action id, adapter-owned operation name, and
 declared relative timestamp. These events are execution context rather than security
 conclusions; endpoint, authorization, key, and application events produced between
-them remain the evidence consumed by security invariants.
+them remain the evidence consumed by security invariants. A transport action emits
+`action.delegated` instead of claiming local completion; the runner separately requires
+the matching applied-fault event.
 
 `credential.revoked` distinguishes `local_identity=true` from a remote invalidation.
 Fast DDS may emit the same semantic transition at both the white-box boundary and the
@@ -147,6 +153,8 @@ after the crypto plugin successfully regenerates the remaining participant's key
 response to remote revocation.
 
 Transport events are evidence from the syscall-boundary shim. They include the fault,
-action id, packet length, and loopback flag, never raw packet contents. A replay event
-therefore proves that the original wire image was resubmitted without embedding the
-security-sensitive bytes in the report.
+action id, packet length, and loopback flag, never raw packet contents. Explicit
+capture records an action id, and replay adds `source_action_id` so evidence binds the
+resent bytes to that stored wire image rather than an unrelated later control packet.
+The runner requires every requested mutation to produce its correlated applied event;
+absence or a failed outcome makes the trial inconclusive.

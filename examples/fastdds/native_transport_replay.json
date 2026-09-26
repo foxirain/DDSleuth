@@ -22,20 +22,26 @@
     "roles": [
       {
         "actor": "reader",
-        "command": ["${DDSLEUTH_FASTDDS_NATIVE_PROBE}", "reader", "reader", "227", "ReplayTopic", "30000", "allow"],
-        "environment": {"ASAN_OPTIONS": "detect_leaks=0", "DDSLEUTH_FASTDDS_OBSERVER": "1"}
+        "command": ["${DDSLEUTH_FASTDDS_NATIVE_PROBE}", "reader", "scripted-reader", "227", "ReplayTopic", "30000", "allow"],
+        "environment": {"ASAN_OPTIONS": "detect_leaks=0", "DDSLEUTH_FASTDDS_OBSERVER": "1"},
+        "actions": [
+          {"id": "create-reader", "at_ms": 0, "operation": "endpoint.create"},
+          {"id": "receive-original", "at_ms": 0, "operation": "sample.wait", "arguments": ["1"]},
+          {"id": "observe-replay", "at_ms": 0, "operation": "sample.observe", "arguments": ["2", "3000"]}
+        ]
       },
       {
         "actor": "writer",
         "command": ["${DDSLEUTH_FASTDDS_NATIVE_PROBE}", "writer", "scripted-writer", "227", "ReplayTopic", "30000", "allow"],
-        "environment": {"ASAN_OPTIONS": "detect_leaks=0", "DDSLEUTH_FASTDDS_OBSERVER": "1"},
-        "start_after": [{"actor": "reader", "kind": "probe.ready", "outcome": "ready", "attributes": {"endpoint": "reader", "topic": "ReplayTopic"}}],
+        "environment": {"ASAN_OPTIONS": "detect_leaks=0", "DDSLEUTH_FASTDDS_OBSERVER": "1", "DDSLEUTH_TRANSPORT_CONTROL": "explicit"},
+        "start_after": [{"actor": "reader", "kind": "endpoint.created", "outcome": "created", "attributes": {"endpoint": "reader", "topic": "ReplayTopic"}}],
         "actions": [
           {"id": "create", "at_ms": 0, "operation": "endpoint.create"},
           {"id": "match", "at_ms": 0, "operation": "endpoint.wait_match"},
-          {"id": "duplicate", "at_ms": 100, "operation": "transport.duplicate_next", "arguments": ["1"]},
-          {"id": "write", "at_ms": 150, "operation": "sample.write", "arguments": ["transport replay control"]},
-          {"id": "replay", "at_ms": 250, "operation": "transport.replay_last", "arguments": ["1"]}
+          {"id": "capture", "at_ms": 100, "operation": "transport.capture_next", "arguments": ["1"]},
+          {"id": "write", "at_ms": 100, "operation": "sample.write", "arguments": ["transport replay control"]},
+          {"id": "replay", "at_ms": 150, "operation": "transport.replay_last", "arguments": ["1"]},
+          {"id": "post-replay-checkpoint", "at_ms": 500, "operation": "execution.checkpoint"}
         ]
       }
     ]

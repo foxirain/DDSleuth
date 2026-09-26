@@ -45,14 +45,17 @@ the baseline causal barriers. `relaxed` schedules deliberately remove them and e
 join/order races. The generator always retains a baseline and uses a deterministic seed
 to select the remaining schedules under a fixed execution budget.
 
-The coverage-guided scheduler executes the causal baseline first and extracts
-semantic states plus actor-local and global transitions from each trace. Run-specific
-GUIDs, timestamps, fingerprints, and measurements are intentionally excluded. Runtime
-novelty rewards the schedule features that produced it; the next case balances those
-learned rewards with unseen static features. The report retains the exact selection
-order, per-trial novelty, and cumulative coverage. This is runtime protocol coverage,
-not compiler source-line coverage. Action plans may also receive stable,
-order-preserving timing jitter.
+The coverage-guided scheduler executes one causal baseline first and then immediately
+uses feedback. It extracts semantic states, actor-local transitions, shared-identifier
+causal edges, security milestones, and anomaly proximity from each trace. Global log
+adjacency is excluded because poll/buffer order is not protocol causality. Run-specific
+GUIDs, timestamps, fingerprints, and measurements are also excluded. New anomalies,
+milestones, causal edges, and states receive descending weights; the next case balances
+those learned rewards with unseen static features and an exploration term. The report
+retains the exact selection order, weighted reward, zero-progress streak, and cumulative
+coverage. A configurable plateau terminates unproductive campaigns. This is runtime
+protocol coverage, not compiler source-line coverage. Action plans may also receive
+stable, order-preserving timing jitter.
 
 Matrix dimensions remain useful for semantic controls, but they are inputs to the
 trajectory generator rather than the primary abstraction. Dotted paths can address
@@ -93,8 +96,11 @@ participant-key regeneration are separate events.
 Transport mutation is a distinct, opt-in boundary. The Fast DDS adapter can preload a
 small UDP shim only for roles with `transport.*` actions in a loopback scenario. It
 captures at most one bounded datagram and implements exact replay plus drop, delay, and
-duplication. Non-loopback addresses are passed through untouched. The library hash is
-part of evidence provenance.
+duplication. The runner forces every Fast DDS role onto explicit loopback UDP with
+DataSharing disabled. Native actions call the shim synchronously; generic programs may
+use its action-plan clock. Non-loopback addresses are passed through untouched. The
+library hash is part of evidence provenance, and a missing/failed applied-fault event
+makes the trial incomplete rather than passing.
 
 ## Evidence layer
 
@@ -108,6 +114,7 @@ Events record observations, not conclusions. Examples include:
 - participant disconnect/reconnect and credential invalidation;
 - applied UDP drop, delay, duplication, or exact replay;
 - protected data returned by a real application reader;
+- normalized sanitizer-confirmed native memory-safety failures;
 - scheduler or process divergence after a partial security trace.
 
 Secret key bytes are never required in the normalized evidence format. Native events

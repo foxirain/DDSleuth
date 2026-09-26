@@ -1,7 +1,9 @@
 from __future__ import annotations
 
-import json
+import ctypes.util
+import gzip
 import hashlib
+import json
 import os
 import secrets
 import shutil
@@ -21,6 +23,16 @@ ACTION_PLAN_ENVIRONMENT = "DDSLEUTH_ACTION_PLAN"
 ACTION_PLAN_HEADER = "# ddsleuth-action-plan-v1"
 TRANSPORT_FAULT_LIBRARY_ENVIRONMENT = "DDSLEUTH_TRANSPORT_FAULT_LIBRARY"
 TRANSPORT_FAULT_ENABLE_ENVIRONMENT = "DDSLEUTH_TRANSPORT_FAULTS"
+FORCE_UDP_ONLY_ENVIRONMENT = "DDSLEUTH_FORCE_UDP_ONLY"
+
+
+_TRANSPORT_FAULT_OUTCOMES = {
+    "transport.drop_next": ("transport.datagram_dropped", "dropped"),
+    "transport.delay_next": ("transport.datagram_delayed", "delayed"),
+    "transport.duplicate_next": ("transport.datagram_duplicated", "duplicated"),
+    "transport.capture_next": ("transport.datagram_captured", "captured"),
+    "transport.replay_last": ("transport.datagram_replayed", "replayed"),
+}
 
 
 class RunnerError(RuntimeError):
@@ -98,8 +110,92 @@ def _write_action_plan(role: RoleCommand, run_dir: Path) -> Path | None:
     return path
 
 
+def _compact_structured_log(path: Path, threshold_bytes: int = 512 * 1024) -> None:
+    """Keep structured evidence readable while bounding repetitive vendor logs.
+
+    The exact original stream remains available as gzip.  The plain log keeps
+    every DDSleuth event plus bounded diagnostic head/tail sections, which is
+    sufficient for fast barriers and post-run inspection without multi-GB
+    campaign directories.
+    """
+
+    if path.stat().st_size <= threshold_bytes:
+        return
+    archive = path.with_suffix(path.suffix + ".gz")
+    archive_tmp = archive.with_suffix(archive.suffix + ".tmp")
+    with path.open("rb") as source, gzip.open(archive_tmp, "wb", compresslevel=6) as output:
+        shutil.copyfileobj(source, output, length=1024 * 1024)
+    os.replace(archive_tmp, archive)
+
+    compact_tmp = path.with_suffix(path.suffix + ".compact.tmp")
+    diagnostic_limit = 128 * 1024
+    diagnostic_head = 0
+    diagnostic_tail: list[bytes] = []
+    diagnostic_tail_bytes = 0
+    with path.open("rb") as source, compact_tmp.open("wb") as output:
+        for line in source:
+            if line.lstrip().startswith(b"DDSLEUTH_EVENT "):
+                output.write(line)
+            elif diagnostic_head < diagnostic_limit:
+                output.write(line)
+                diagnostic_head += len(line)
+            else:
+                diagnostic_tail.append(line)
+                diagnostic_tail_bytes += len(line)
+                while diagnostic_tail and diagnostic_tail_bytes > diagnostic_limit:
+                    diagnostic_tail_bytes -= len(diagnostic_tail.pop(0))
+        output.write(
+            b"\n[DDSleuth compacted repetitive diagnostics; exact stream is in the .log.gz archive]\n"
+        )
+        for line in diagnostic_tail:
+            output.write(line)
+    os.replace(compact_tmp, path)
+
+
 def _uses_transport_faults(role: RoleCommand) -> bool:
     return any(action.operation.startswith("transport.") for action in role.actions)
+
+
+def _validate_transport_fault_actions(
+    execution: ExecutionSpec,
+    events: tuple[Mapping[str, JsonValue], ...],
+) -> None:
+    """Fail closed when a requested network mutation never reached the wire.
+
+    A scheduled action is not evidence that the preload shim saw a UDP packet.
+    Each action therefore needs its action-id-correlated applied event.  This
+    prevents SHM fallback, socket failures, and late process exit from being
+    counted as successful security experiments.
+    """
+
+    missing: list[str] = []
+    failed: list[str] = []
+    for role in execution.roles:
+        for action in role.actions:
+            expected = _TRANSPORT_FAULT_OUTCOMES.get(action.operation)
+            if expected is None:
+                continue
+            kind, outcome = expected
+            matches = [
+                event
+                for event in events
+                if event.get("actor") == role.actor
+                and event.get("kind") == kind
+                and isinstance(event.get("attributes"), Mapping)
+                and event["attributes"].get("action_id") == action.action_id
+            ]
+            label = f"{role.actor}:{action.action_id}:{action.operation}"
+            if not matches:
+                missing.append(label)
+            elif not any(event.get("outcome") == outcome for event in matches):
+                failed.append(label)
+    if missing or failed:
+        parts: list[str] = []
+        if missing:
+            parts.append("not applied=" + ", ".join(missing))
+        if failed:
+            parts.append("failed=" + ", ".join(failed))
+        raise RunnerError("transport fault contract was not satisfied: " + "; ".join(parts))
 
 
 def _transport_fault_provenance(
@@ -158,14 +254,25 @@ def run_processes(
         raise RunnerError(
             f"{TRANSPORT_FAULT_ENABLE_ENVIRONMENT} is runner-reserved and cannot be supplied globally"
         )
+    if environment is not None and FORCE_UDP_ONLY_ENVIRONMENT in environment:
+        raise RunnerError(
+            f"{FORCE_UDP_ONLY_ENVIRONMENT} is runner-reserved and cannot be supplied globally"
+        )
     base_environment = dict(os.environ)
     # Never inherit a stale plan path from the parent shell. A plan exists only
     # when it was derived from this run's digested scenario.
     base_environment.pop(ACTION_PLAN_ENVIRONMENT, None)
     base_environment.pop(TRANSPORT_FAULT_ENABLE_ENVIRONMENT, None)
+    base_environment.pop(FORCE_UDP_ONLY_ENVIRONMENT, None)
     base_environment.update(environment or {})
     base_environment["DDSLEUTH_RUN_DIR"] = str(run_dir)
     base_environment[FINGERPRINT_ENVIRONMENT] = secrets.token_hex(32)
+    transport_experiment = any(_uses_transport_faults(role) for role in execution.roles)
+    if transport_experiment:
+        # Every participant must use the same transport topology.  Applying
+        # LD_PRELOAD only to the mutating actor is still sufficient, but all
+        # Fast DDS probes are forced away from SHM/DataSharing.
+        base_environment[FORCE_UDP_ONLY_ENVIRONMENT] = "1"
 
     injected_role_environments = injected_role_environments or {}
     known_actors = {role.actor for role in execution.roles}
@@ -208,6 +315,10 @@ def run_processes(
                 raise RunnerError(
                     f"role {role.actor} may not select its own transport fault library"
                 )
+            if FORCE_UDP_ONLY_ENVIRONMENT in role.environment:
+                raise RunnerError(
+                    f"role {role.actor} may not override runner-controlled UDP-only mode"
+                )
             if role.start_after:
                 try:
                     wait_for_barriers(
@@ -249,6 +360,25 @@ def run_processes(
             if transport_fault is not None:
                 library, _ = transport_fault
                 existing_preload = role_environment.get("LD_PRELOAD", "")
+                if "ASAN_OPTIONS" in role_environment and "libasan" not in existing_preload:
+                    # LD_PRELOAD libraries precede DT_NEEDED dependencies.  A
+                    # sanitizer-instrumented probe therefore needs libasan
+                    # explicitly restored to the first slot before our shim.
+                    asan_runtime = ctypes.util.find_library("asan")
+                    if asan_runtime:
+                        existing_preload = (
+                            f"{asan_runtime}:{existing_preload}"
+                            if existing_preload
+                            else asan_runtime
+                        )
+                    else:
+                        options = role_environment.get("ASAN_OPTIONS", "")
+                        if "verify_asan_link_order=" not in options:
+                            role_environment["ASAN_OPTIONS"] = (
+                                f"{options}:verify_asan_link_order=0"
+                                if options
+                                else "verify_asan_link_order=0"
+                            )
                 role_environment["LD_PRELOAD"] = (
                     f"{existing_preload}:{library}" if existing_preload else str(library)
                 )
@@ -297,6 +427,7 @@ def run_processes(
             monitor.poll({actor: log for actor, _, log, _, _, _, _ in active})
         except CoordinationError as error:
             raise RunnerError(str(error)) from error
+        _validate_transport_fault_actions(execution, monitor.events)
 
     except RunnerError as error:
         if not preserve_partial or not active:
@@ -326,6 +457,10 @@ def run_processes(
         except CoordinationError:
             pass
 
+    if execution.log_format == "ddssec-jsonl":
+        for _, _, log_path, _, _, _, _ in active:
+            _compact_structured_log(log_path)
+
     processes = tuple(
         ProcessRun(
             actor,
@@ -348,6 +483,11 @@ def run_processes(
     error_record: dict[str, JsonValue] | None = None
     if partial_error is not None:
         launched = [item.actor for item in processes]
+        affected_actors = [
+            role.actor
+            for role in execution.roles
+            if _uses_transport_faults(role)
+        ]
         error_record = {
             "type": type(partial_error).__name__,
             "message": str(partial_error),
@@ -356,6 +496,8 @@ def run_processes(
                 role.actor for role in execution.roles if role.actor not in set(launched)
             ],
         }
+        if affected_actors:
+            error_record["affected_actors"] = affected_actors
         (run_dir / "runner-error.json").write_text(
             json.dumps(error_record, indent=2, sort_keys=True) + "\n",
             encoding="utf-8",

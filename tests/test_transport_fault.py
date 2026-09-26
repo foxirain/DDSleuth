@@ -48,7 +48,10 @@ class TransportFaultTests(unittest.TestCase):
                     RoleCommand(
                         actor="alice",
                         command=(sys.executable, "-c", script),
-                        actions=(RoleAction("replay", 50, "transport.replay_last", ("1",)),),
+                        actions=(
+                            RoleAction("capture", 0, "transport.capture_next", ("1",)),
+                            RoleAction("replay", 50, "transport.replay_last", ("1",)),
+                        ),
                     ),
                 ),
             )
@@ -64,6 +67,12 @@ class TransportFaultTests(unittest.TestCase):
                     for event in artifacts.structured_events
                 )
             )
+            replay = next(
+                event
+                for event in artifacts.structured_events
+                if event.get("kind") == "transport.datagram_replayed"
+            )
+            self.assertEqual("capture", replay["attributes"]["source_action_id"])
             self.assertIsNotNone(artifacts.processes[0].transport_fault_library)
 
 

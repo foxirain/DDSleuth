@@ -1,13 +1,21 @@
 from __future__ import annotations
 
-import tempfile
+import gzip
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
 from ddsleuth.models import EventBarrier, ExecutionSpec, RoleAction, RoleCommand
 from ddsleuth.fingerprints import FINGERPRINT_ENVIRONMENT
-from ddsleuth.runner import ACTION_PLAN_ENVIRONMENT, RunnerError, run_processes
+from ddsleuth.runner import (
+    ACTION_PLAN_ENVIRONMENT,
+    FORCE_UDP_ONLY_ENVIRONMENT,
+    RunnerError,
+    _validate_transport_fault_actions,
+    _compact_structured_log,
+    run_processes,
+)
 
 
 class RunnerTests(unittest.TestCase):
@@ -123,6 +131,65 @@ class RunnerTests(unittest.TestCase):
                     Path(directory),
                     {ACTION_PLAN_ENVIRONMENT: "/tmp/spoofed"},
                 )
+
+    def test_transport_fault_action_requires_correlated_applied_event(self) -> None:
+        execution = ExecutionSpec(
+            network="loopback",
+            timeout_seconds=1,
+            log_format="ddssec-jsonl",
+            roles=(
+                RoleCommand(
+                    actor="writer",
+                    command=("/bin/true",),
+                    actions=(
+                        RoleAction("replay", 0, "transport.replay_last", ("1",)),
+                    ),
+                ),
+            ),
+        )
+        with self.assertRaisesRegex(RunnerError, "not applied"):
+            _validate_transport_fault_actions(execution, ())
+        _validate_transport_fault_actions(
+            execution,
+            (
+                {
+                    "actor": "writer",
+                    "kind": "transport.datagram_replayed",
+                    "outcome": "replayed",
+                    "attributes": {"action_id": "replay"},
+                },
+            ),
+        )
+
+    def test_global_environment_cannot_override_udp_only_mode(self) -> None:
+        execution = ExecutionSpec(
+            network="loopback",
+            timeout_seconds=1,
+            log_format="ddssec-jsonl",
+            roles=(RoleCommand(actor="mallory", command=("/bin/true",)),),
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertRaisesRegex(RunnerError, "runner-reserved"):
+                run_processes(
+                    execution,
+                    Path(directory),
+                    {FORCE_UDP_ONLY_ENVIRONMENT: "0"},
+                )
+
+    def test_large_structured_log_keeps_events_and_archives_exact_stream(self) -> None:
+        event = (
+            b'DDSLEUTH_EVENT {"kind":"probe.ready","actor":"alice",'
+            b'"implementation":"test","outcome":"ready","attributes":{}}\n'
+        )
+        original = b"vendor diagnostic\n" * 20000 + event + b"tail diagnostic\n" * 20000
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "alice.log"
+            path.write_bytes(original)
+            _compact_structured_log(path, threshold_bytes=1024)
+            self.assertIn(event, path.read_bytes())
+            archive = Path(str(path) + ".gz")
+            with gzip.open(archive, "rb") as stream:
+                self.assertEqual(original, stream.read())
 
     def test_runner_binds_actor_environment(self) -> None:
         execution = ExecutionSpec(
