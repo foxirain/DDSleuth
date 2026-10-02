@@ -31,7 +31,7 @@ Issues = "https://github.com/foxirain/DDSleuth/issues"
 [project.optional-dependencies]
 release = [
   "build>=1.2,<2",
-  "setuptools>=77,<82",
+  "setuptools>=77,<85",
   "twine>=5,<7",
   "wheel>=0.45,<1",
 ]
